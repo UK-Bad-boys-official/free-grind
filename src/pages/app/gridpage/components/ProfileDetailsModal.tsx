@@ -33,6 +33,7 @@ import {
 import { getProfileImageUrl } from "../../../../utils/media";
 import { ProfileImage } from "../../../../components/ui/profile-image";
 import freegrindLogo from "../../../../images/freegrind-logo.webp";
+import { FreeGrindBadge } from "../../../../components/FreeGrindBadge";
 import { usePreferences } from "../../../../contexts/PreferencesContext";
 import { formatDateTime24 } from "../../chat/chatUtils";
 import { formatRelativeTime } from "../../../../utils/relativeTime";
@@ -81,6 +82,7 @@ type ProfileDetailsModalProps = {
 	isTappingProfile?: boolean;
 	isTapBlocked?: boolean;
 	tapVisualState?: { state: "none" | "single" | "mutual"; tapId: number };
+	onTagClick?: (tag: string) => void;
 	activeProfile: ProfileDetail | null;
 	selectedBrowseCard: BrowseCard | null;
 	isLoadingActiveProfile: boolean;
@@ -127,6 +129,7 @@ export function ProfileDetailsModal({
 	isTappingProfile = false,
 	isTapBlocked = false,
 	tapVisualState = { state: "none", tapId: 1 },
+	onTagClick,
 	activeProfile,
 	selectedBrowseCard,
 	isLoadingActiveProfile,
@@ -957,7 +960,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 						<div className="flex items-center gap-1.5 min-w-0">
 							<p className={`truncate text-base font-semibold leading-tight${inlineScrolled ? "" : " text-white"}`}>{activeProfileName}</p>
 							{usesFreegrind && (
-								<img src={freegrindLogo} alt="Free Grind user" title={t("profile_details.uses_free_grind")} className="h-4 w-4 shrink-0 rounded-full border border-[var(--border)]" />
+								<FreeGrindBadge size="sm" title={t("profile_details.uses_free_grind")} />
 							)}
 							{activeProfile?.age != null && Number.isFinite(activeProfile.age) && (
 								<span className={`shrink-0 text-sm${inlineScrolled ? " text-[var(--text-muted)]" : " text-white/70"}`}>{activeProfile.age}</span>
@@ -1149,6 +1152,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							usesFreegrind={usesFreegrind ?? false}
 							onMessageProfile={variant === "page" && !isOwnProfile ? onMessageProfile : undefined}
 							onTapProfile={variant === "page" && !isOwnProfile ? onTapProfile : undefined}
+							onTagClick={onTagClick}
 							onPhotoIndexChange={setMobileCarouselPhotoIndex}
 							onDragDeltaChange={setCarouselDragDelta}
 							isTapDisabled={isTapDisabled}
@@ -1274,7 +1278,14 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 								}}
 								className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-none bg-transparent text-[var(--accent)] transition hover:brightness-110"
 							>
-								<MessageCircle className="h-5 w-5" strokeWidth={1.8} />
+								<span className="relative inline-flex">
+									<MessageCircle className="h-5 w-5" strokeWidth={1.8} />
+									{(chatContactStatus?.unreadCount ?? 0) > 0 && (
+										<span className="absolute -top-1.5 -right-2 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--accent-contrast)] shadow-sm">
+											{chatContactStatus?.unreadCount}
+										</span>
+									)}
+								</span>
 							</button>
 						)}
 					</div>
@@ -1540,6 +1551,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 											usesFreegrind={usesFreegrind ?? false}
 											onMessageProfile={undefined}
 											onTapProfile={undefined}
+											onTagClick={onTagClick}
 											isTapDisabled={isTapDisabled}
 											isTapBlocked={isTapBlocked}
 											isTapActive={isTapActive}
@@ -1603,7 +1615,14 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 										{(onMessageProfile || onSendQuickMessage) && (
 											<button type="button" onClick={() => { if (quickMessageDraft.trim()) { onSendQuickMessage?.(String(messageProfileId), quickMessageDraft.trim()); setQuickMessageDraft(""); } else { onMessageProfile?.(String(messageProfileId)); } }}
 												className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-none bg-transparent text-[var(--accent)] transition hover:brightness-110">
-												<MessageCircle className="h-5 w-5" strokeWidth={1.8} />
+												<span className="relative inline-flex">
+													<MessageCircle className="h-5 w-5" strokeWidth={1.8} />
+													{(chatContactStatus?.unreadCount ?? 0) > 0 && (
+														<span className="absolute -top-1.5 -right-2 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--accent-contrast)] shadow-sm">
+															{chatContactStatus?.unreadCount}
+														</span>
+													)}
+												</span>
 											</button>
 										)}
 									</div>

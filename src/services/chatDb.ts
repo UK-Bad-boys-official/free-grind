@@ -26,6 +26,7 @@ import type {
 	AlbumMediaUpsertInput,
 	AlbumUpsertInput,
 	ArchivedReason,
+	BlockEventType,
 	BlockState,
 	DownloadedMediaEntry,
 	FullDbExport,
@@ -33,6 +34,7 @@ import type {
 	StoredAlbum,
 	StoredAlbumMedia,
 	StoredAvatar,
+	StoredBlockEvent,
 	StoredConversation,
 	StoredMediaFile,
 	StoredMessage,
@@ -66,8 +68,10 @@ type ConversationRow = {
 	archived: number;
 	archived_reason: string | null;
 	archived_at: number | null;
+	hidden: number;
 	block_state: string | null;
 	last_seen_in_inbox_at: number | null;
+	messages_synced_activity_timestamp: number | null;
 	created_at: number;
 	updated_at: number;
 };
@@ -130,6 +134,17 @@ type AvatarRow = {
 	fetched_at: number;
 };
 
+type BlockEventRow = {
+	id: string;
+	profile_id: string | null;
+	conversation_id: string;
+	event_type: string;
+	timestamp: number;
+	display_name: string | null;
+	avatar_media_hash: string | null;
+	created_at: number;
+};
+
 type DownloadedMediaRow = {
 	identifier: string;
 	platform: string;
@@ -188,6 +203,26 @@ async function getDb(): Promise<Database> {
 				// chat.v1.conversation.delete event. NULL = not blocked either way.
 				try {
 					await db.execute("ALTER TABLE conversations ADD COLUMN block_state TEXT");
+				} catch {
+					// already migrated
+				}
+				// Added later: tracks message-fetch progress separately from
+				// conversation-metadata freshness so inboxSync can resume an
+				// interrupted first sync without re-walking conversations whose
+				// messages already landed (see StoredConversation.messagesSyncedActivityTimestamp).
+				try {
+					await db.execute(
+						"ALTER TABLE conversations ADD COLUMN messages_synced_activity_timestamp INTEGER",
+					);
+				} catch {
+					// already migrated
+				}
+				// Added later: manual, local-only "hide this chat from the inbox"
+				// flag — unlike `archived` (server says the conversation is gone),
+				// hidden conversations still round-trip through /v4/inbox normally;
+				// this only affects the client-side filteredConversations view.
+				try {
+					await db.execute("ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
 				} catch {
 					// already migrated
 				}
@@ -330,6 +365,22 @@ async function getDb(): Promise<Database> {
 						created_at INTEGER NOT NULL
 					)
 				`);
+
+				await db.execute(`
+					CREATE TABLE IF NOT EXISTS block_events (
+						id TEXT PRIMARY KEY,
+						profile_id TEXT,
+						conversation_id TEXT NOT NULL,
+						event_type TEXT NOT NULL,
+						timestamp INTEGER NOT NULL,
+						display_name TEXT,
+						avatar_media_hash TEXT,
+						created_at INTEGER NOT NULL
+					)
+				`);
+				await db.execute(
+					"CREATE INDEX IF NOT EXISTS idx_block_events_timestamp ON block_events(timestamp DESC)",
+				);
 			});
 
 			return db;
@@ -489,8 +540,10 @@ function rowToStoredConversation(row: ConversationRow): StoredConversation {
 		archived: Boolean(row.archived),
 		archivedReason: (row.archived_reason as ArchivedReason | null) ?? null,
 		archivedAt: row.archived_at,
+		hidden: Boolean(row.hidden),
 		blockState: (row.block_state as BlockState | null) ?? null,
 		lastSeenInInboxAt: row.last_seen_in_inbox_at,
+		messagesSyncedActivityTimestamp: row.messages_synced_activity_timestamp,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -537,6 +590,26 @@ export async function upsertConversation(
 				entry.data.preview ? JSON.stringify(entry.data.preview) : null,
 				now,
 			],
+		);
+	});
+}
+
+/**
+ * Records that this conversation's messages are up to date as of
+ * `activityTimestamp` (its lastActivityTimestamp at fetch time) — lets
+ * inboxSync distinguish "conversation metadata is current" from "messages
+ * are current" so a resumed sync only re-fetches conversations that never
+ * actually got their messages, instead of every conversation seen so far.
+ */
+export async function markConversationMessagesSynced(
+	conversationId: string,
+	activityTimestamp: number | null,
+): Promise<void> {
+	const db = await getDb();
+	await executeWithLockRetry(db, "mark-conversation-messages-synced", async () => {
+		await db.execute(
+			"UPDATE conversations SET messages_synced_activity_timestamp = $1 WHERE conversation_id = $2",
+			[activityTimestamp, conversationId],
 		);
 	});
 }
@@ -662,6 +735,32 @@ export async function setConversationArchived(
 			[conversationId, archived ? 1 : 0, archived ? reason : null, archived ? now : null, now],
 		);
 	});
+}
+
+export async function setConversationHidden(
+	conversationId: string,
+	hidden: boolean,
+): Promise<void> {
+	const db = await getDb();
+	const now = Date.now();
+
+	await executeWithLockRetry(db, "set-conversation-hidden", async () => {
+		await db.execute(
+			"UPDATE conversations SET hidden = $2, updated_at = $3 WHERE conversation_id = $1",
+			[conversationId, hidden ? 1 : 0, now],
+		);
+	});
+}
+
+/** All conversation ids currently flagged hidden — used to hydrate ChatPage's
+ * in-memory set once on mount, since hidden conversations are otherwise
+ * indistinguishable from any other row in a normal inbox fetch. */
+export async function listHiddenConversationIds(): Promise<string[]> {
+	const db = await getDb();
+	const rows = await db.select<{ conversation_id: string }[]>(
+		"SELECT conversation_id FROM conversations WHERE hidden = 1",
+	);
+	return rows.map((row) => row.conversation_id);
 }
 
 /**
@@ -895,7 +994,87 @@ export async function insertSystemMessage(
 		replyPreview: null,
 	};
 	await upsertMessages(conversationId, [message]);
+
+	// Only the other side's own action gets a durable block_events row — our
+	// own block/unblock is already visible from the confirmation dialog and
+	// immediate UI change that triggered it (mirrors the toast in
+	// ChatRealtimeBridge.tsx, which skips the "...BySelf" variants the same way).
+	if (type === "SystemBlocked" || type === "SystemUnblocked") {
+		await recordBlockEvent(
+			conversationId,
+			type === "SystemBlocked" ? "blocked" : "unblocked",
+			timestamp,
+		);
+	}
+
 	return message;
+}
+
+/**
+ * Snapshots the other participant's name/avatar into a standalone row at the
+ * moment they block/unblock us — deliberately not derived from the
+ * SystemBlocked/SystemUnblocked messages on read, since a profile that
+ * blocked us can later become fully unresolvable (deleted/banned, or its
+ * conversation ages out of the live inbox), which would otherwise leave the
+ * history page unable to show who it even was.
+ */
+async function recordBlockEvent(
+	conversationId: string,
+	eventType: BlockEventType,
+	timestamp: number,
+): Promise<void> {
+	const conversation = await getConversation(conversationId);
+	const otherProfileId = conversation?.otherProfileId ?? null;
+	const otherParticipant =
+		conversation?.entry.data.participants.find(
+			(p) => String(p.profileId) === otherProfileId,
+		) ?? conversation?.entry.data.participants[0] ?? null;
+	const displayName = conversation?.entry.data.name?.trim() || null;
+	const avatarMediaHash = otherParticipant?.primaryMediaHash ?? null;
+
+	const id = `${conversationId}:${eventType}:${timestamp}`;
+	const db = await getDb();
+	const now = Date.now();
+	await executeWithLockRetry(db, "insert-block-event", async () => {
+		await db.execute(
+			`
+			INSERT INTO block_events (
+				id, profile_id, conversation_id, event_type, timestamp,
+				display_name, avatar_media_hash, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT(id) DO UPDATE SET
+				profile_id = excluded.profile_id,
+				display_name = excluded.display_name,
+				avatar_media_hash = excluded.avatar_media_hash
+			`,
+			[id, otherProfileId, conversationId, eventType, timestamp, displayName, avatarMediaHash, now],
+		);
+	});
+}
+
+function rowToStoredBlockEvent(row: BlockEventRow): StoredBlockEvent {
+	return {
+		id: row.id,
+		profileId: row.profile_id,
+		conversationId: row.conversation_id,
+		eventType: row.event_type as BlockEventType,
+		timestamp: row.timestamp,
+		displayName: row.display_name,
+		avatarMediaHash: row.avatar_media_hash,
+		createdAt: row.created_at,
+	};
+}
+
+/**
+ * All local block/unblock-by-other history, most recent first — backs the
+ * Settings block-history page.
+ */
+export async function listBlockEvents(): Promise<StoredBlockEvent[]> {
+	const db = await getDb();
+	const rows = await db.select<BlockEventRow[]>(
+		"SELECT * FROM block_events ORDER BY timestamp DESC",
+	);
+	return rows.map(rowToStoredBlockEvent);
 }
 
 export async function getMessages(conversationId: string): Promise<StoredMessage[]> {
@@ -1040,24 +1219,6 @@ export async function deleteMessageRow(messageId: string): Promise<void> {
 
 	await executeWithLockRetry(db, "delete-message", async () => {
 		await db.execute("DELETE FROM messages WHERE message_id = $1", [messageId]);
-	});
-}
-
-export async function clearMessagesForConversation(
-	conversationId: string,
-): Promise<void> {
-	const db = await getDb();
-
-	await executeWithLockRetry(db, "clear-messages-for-conversation", async () => {
-		await db.execute("DELETE FROM messages WHERE conversation_id = $1", [
-			conversationId,
-		]);
-		await db.execute("DELETE FROM media_files WHERE conversation_id = $1", [
-			conversationId,
-		]);
-		await db.execute("DELETE FROM conversation_meta WHERE conversation_id = $1", [
-			conversationId,
-		]);
 	});
 }
 
@@ -1521,7 +1682,7 @@ const FULL_EXPORT_TABLES: {
 		columns: [
 			"conversation_id", "other_profile_id", "name", "participants_json",
 			"last_activity_timestamp", "unread_count", "pinned", "muted", "favorite",
-			"preview_json", "archived", "archived_reason", "archived_at",
+			"preview_json", "archived", "archived_reason", "archived_at", "hidden",
 			"last_seen_in_inbox_at", "created_at", "updated_at",
 		],
 	},
