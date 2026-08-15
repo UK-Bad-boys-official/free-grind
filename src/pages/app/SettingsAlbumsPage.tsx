@@ -8,6 +8,7 @@ import {
 	GripVertical,
 	HardDrive,
 	Images,
+	Inbox,
 	Pencil,
 	Play,
 	Plus,
@@ -50,6 +51,10 @@ import {
 	getVideodimensions,
 	getVideoDurationMs,
 } from "./settings-albums/settingsAlbumsUtils";
+import { AlbumDrawerPickerSheet } from "./settings-albums/AlbumDrawerPickerSheet";
+import type { DrawerMedia } from "./chat/ChatDrawerPanel";
+import { sortDrawerMediaByUsage } from "./chat/chatUtils";
+import * as chatDb from "../../services/chatDb";
 import {
 	DndContext,
 	PointerSensor,
@@ -68,6 +73,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { ProfileImage } from "../../components/ui/profile-image";
 import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
 import { useNavigate, useLocation } from "react-router-dom";
+import { usePreferences } from "../../contexts/PreferencesContext";
 
 function LimitRow({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
 	return (
@@ -193,6 +199,7 @@ type ShareProfileListItem = {
 
 export function SettingsAlbumsPage() {
 	const { t } = useTranslation();
+	const { sortDrawerMediaByFrequency } = usePreferences();
 	const isDesktop = useDesktopBreakpoint();
 	const apiFunctions = useApiFunctions();
 	const navigate = useNavigate();
@@ -224,6 +231,13 @@ export function SettingsAlbumsPage() {
 	const [confirmDeleteAlbumId, setConfirmDeleteAlbumId] = useState<string | null>(null);
 	const [confirmDeleteContentKey, setConfirmDeleteContentKey] = useState<string | null>(null);
 	const [editOpenedAlbumId, setEditOpenedAlbumId] = useState<string | null>(null);
+
+	// Drawer picker state ("add to album" from own chat drawer media)
+	const [drawerMedia, setDrawerMedia] = useState<DrawerMedia[]>([]);
+	const [isLoadingDrawerMedia, setIsLoadingDrawerMedia] = useState(false);
+	const [drawerMediaError, setDrawerMediaError] = useState<string | null>(null);
+	const [drawerPickerAlbumId, setDrawerPickerAlbumId] = useState<string | null>(null);
+	const [isAddingFromDrawer, setIsAddingFromDrawer] = useState(false);
 
 	// Shares state
 	const [albumShareProfiles, setAlbumShareProfiles] = useState<Record<string, ShareProfileListItem[]>>({});
@@ -391,6 +405,60 @@ export function SettingsAlbumsPage() {
 			setLoadingAlbumDetailsId((previous) => previous === albumId ? null : previous);
 		}
 	}, [albumDetails, apiFunctions]);
+
+	const loadDrawerMedia = useCallback(async (forceRefresh = false) => {
+		if (!forceRefresh && drawerMedia.length > 0) return;
+		setIsLoadingDrawerMedia(true);
+		setDrawerMediaError(null);
+		try {
+			const [items, sendCounts] = await Promise.all([
+				apiFunctions.getGlobalDrawerMedia(),
+				chatDb.getDrawerMediaSendCounts(),
+			]);
+			const withCounts = items.map((item) => ({ ...item, sendCount: sendCounts.get(item.id) ?? 0 }));
+			setDrawerMedia(
+				sortDrawerMediaByFrequency ? sortDrawerMediaByUsage(withCounts) : withCounts,
+			);
+		} catch (loadError) {
+			setDrawerMediaError(
+				loadError instanceof Error ? loadError.message : t("settings_albums.error_load_details_fallback"),
+			);
+		} finally {
+			setIsLoadingDrawerMedia(false);
+		}
+	}, [apiFunctions, drawerMedia.length, sortDrawerMediaByFrequency, t]);
+
+	const openDrawerPicker = useCallback((albumId: string) => {
+		const mediaCounts = countAlbumMedia(albumDetails[albumId]);
+		if (limits?.maxContentItemsPerAlbum != null && mediaCounts.total >= limits.maxContentItemsPerAlbum) {
+			toast.error(t("settings_albums.error_album_full", {
+				defaultValue: "Album is full (max {{max}} items).",
+				max: limits.maxContentItemsPerAlbum,
+			}));
+			return;
+		}
+		setDrawerPickerAlbumId(albumId);
+		// Force-refresh — otherwise the guard in loadDrawerMedia reuses the
+		// cached list from a previous picker session and drawer media added
+		// since then (e.g. from the chat screen) never shows up here.
+		void loadDrawerMedia(true);
+	}, [albumDetails, limits, loadDrawerMedia, t]);
+
+	const handleAddFromDrawer = useCallback(async (mediaIds: number[]) => {
+		if (!drawerPickerAlbumId || mediaIds.length === 0) return;
+		const albumId = drawerPickerAlbumId;
+		setIsAddingFromDrawer(true);
+		try {
+			await apiFunctions.addOwnAlbumContentByIds({ albumId, ids: mediaIds });
+			toast.success(t("settings_albums.toast_added_from_drawer", { count: mediaIds.length }));
+			await loadAlbumDetails(albumId, true);
+			setDrawerPickerAlbumId(null);
+		} catch (addError) {
+			toast.error(addError instanceof Error ? addError.message : t("settings_albums.error_upload_fallback"));
+		} finally {
+			setIsAddingFromDrawer(false);
+		}
+	}, [apiFunctions, drawerPickerAlbumId, loadAlbumDetails, t]);
 
 	const loadAlbumShares = useCallback(async (albumId: string, forceRefresh = false) => {
 		if (!forceRefresh && albumShareProfiles[albumId]) return;
@@ -991,6 +1059,14 @@ export function SettingsAlbumsPage() {
 														</label>
 														<button
 															type="button"
+															onClick={() => openDrawerPicker(album.albumId)}
+															className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-[var(--border)] px-2.5 text-xs font-medium transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+														>
+															<Inbox className="h-3.5 w-3.5" />
+															{t("settings_albums.add_from_drawer", { defaultValue: "Add from Drawer" })}
+														</button>
+														<button
+															type="button"
 															onClick={() => {
 																void loadAlbumDetails(album.albumId, true);
 																void loadAlbumShares(album.albumId, true);
@@ -1170,6 +1246,26 @@ export function SettingsAlbumsPage() {
 				isProcessing={unsharingAllAlbumId !== null}
 				confirmTone="danger"
 			/>
+
+			{drawerPickerAlbumId ? (() => {
+				const mediaCounts = countAlbumMedia(albumDetails[drawerPickerAlbumId]);
+				const remainingSlots = limits?.maxContentItemsPerAlbum != null
+					? Math.max(0, limits.maxContentItemsPerAlbum - mediaCounts.total)
+					: Infinity;
+				return (
+					<AlbumDrawerPickerSheet
+						media={drawerMedia}
+						isLoading={isLoadingDrawerMedia}
+						error={drawerMediaError}
+						onLoadMedia={() => void loadDrawerMedia(true)}
+						onClose={() => setDrawerPickerAlbumId(null)}
+						onConfirm={handleAddFromDrawer}
+						isSubmitting={isAddingFromDrawer}
+						remainingSlots={remainingSlots}
+						isDesktop={isDesktop}
+					/>
+				);
+			})() : null}
 		</section>
 	);
 }

@@ -1,4 +1,5 @@
-import { X, Home, Camera, Map, Loader2, CheckCircle2, AlertCircle, EyeOff, Droplet, Info, Lock, Hourglass } from "lucide-react";
+import { X, Home, Camera, Loader2, CheckCircle2, AlertCircle, Lock, Hourglass } from "lucide-react";
+import { RightNowIcon } from "../../../components/icons/RightNowIcon";
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { appLog } from "../../../utils/logger";
@@ -7,11 +8,9 @@ import { cn } from "../../../utils/cn";
 import { PageHeaderBackground } from "../../../components/ui/PageHeaderBackground";
 import { ToggleRow } from "../../../components/ui/toggle-row";
 import { usePreferences } from "../../../contexts/PreferencesContext";
-import { decodeGeohash } from "../../../utils/geohash";
 import { prepare1024SquareImage } from "../../../utils/media";
 import { useApiFunctions } from "../../../hooks/useApiFunctions";
 import type { RightNowCreatePostRequest, RightNowUpdatePostRequest } from "../../../services/apiFunctions";
-import { buildBinaryUpload } from "../chat/chatUtils";
 import { getRightNowSessionDuration } from "./rightnow-constants";
 import { simulateCreatePost, simulateEndSession, simulateFetchActivePost, simulateUpdatePost, simulateUploadMedia } from "./rightnow-simulation";
 
@@ -23,7 +22,7 @@ interface RightNowPostPageProps {
 export function RightNowPostPage({ onClose, onPost }: RightNowPostPageProps) {
 	const { t } = useTranslation();
 	const apiFunctions = useApiFunctions();
-	const { geohash, setPreferences, activeRightNowId, activeRightNowExpiresAt, developerMode, showDebugInfo, rightNowRemaining, rightNowTestMode } = usePreferences();
+	const { setPreferences, activeRightNowId, activeRightNowExpiresAt, developerMode, showDebugInfo, rightNowRemaining, rightNowTestMode } = usePreferences();
 	const [isClosing, setIsClosing] = useState(false);
 	const isClosingRef = useRef(false);
 	const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -37,7 +36,6 @@ export function RightNowPostPage({ onClose, onPost }: RightNowPostPageProps) {
 	const [isUploading, setIsUploading] = useState(false);
 	const [isPosting, setIsPosting] = useState(false);
 	const [isEnding, setIsEnding] = useState(false);
-	const [showTooltip, setShowTooltip] = useState(false);
 
 	const [debugInfo, setDebugInfo] = useState<{ time: string; data: any } | null>(null);
 	const [debugId, setDebugId] = useState("");
@@ -146,19 +144,6 @@ export function RightNowPostPage({ onClose, onPost }: RightNowPostPageProps) {
 		const interval = setInterval(() => update(false), 10000);
 		return () => clearInterval(interval);
 	}, [isEditMode, activeRightNowExpiresAt]);
-
-	const currentLocation = useMemo(() => {
-		if (!geohash) return null;
-		try {
-			const decoded = decodeGeohash(geohash);
-			return {
-				lat: (decoded.lat[0] + decoded.lat[1]) / 2,
-				lon: (decoded.lon[0] + decoded.lon[1]) / 2,
-			};
-		} catch {
-			return null;
-		}
-	}, [geohash]);
 
 	const handleClose = useCallback(() => {
 		if (isClosingRef.current) return;
@@ -388,7 +373,7 @@ export function RightNowPostPage({ onClose, onPost }: RightNowPostPageProps) {
 					<div className="flex items-center justify-between gap-3">
 						<div className="flex items-center gap-3">
 							<div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[var(--surface-2)] text-[var(--text)]">
-								<Droplet className="h-5 w-5 fill-current" />
+								<RightNowIcon className="h-5 w-5" />
 							</div>
 							<h2 className="text-xl font-bold tracking-tight text-[var(--text)]">
 								{isEditMode
@@ -453,7 +438,7 @@ export function RightNowPostPage({ onClose, onPost }: RightNowPostPageProps) {
 							}}
 						>
 							<ToggleRow
-								icon={<Droplet className="h-5 w-5 fill-current" />}
+								icon={<RightNowIcon className="h-5 w-5" />}
 								iconClass={cn(
 									"flex h-10 w-10 items-center justify-center shadow-sm transition-colors",
 									isHidden ? "bg-[var(--surface-3,var(--surface))] text-[var(--text-muted)]" : "bg-[var(--right-now)] text-white"
@@ -477,7 +462,7 @@ export function RightNowPostPage({ onClose, onPost }: RightNowPostPageProps) {
 						>
 							<div className="flex items-center gap-4">
 								<div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[var(--right-now)] text-white shadow-sm">
-									<Droplet className="h-5 w-5 fill-current" />
+									<RightNowIcon className="h-5 w-5" />
 								</div>
 								<div>
 									<div className="flex items-center gap-1.5">

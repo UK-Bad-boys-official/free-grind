@@ -83,6 +83,17 @@ export type StoredMediaFile = {
 	fetchedAt: number;
 };
 
+/**
+ * StoredMediaFile plus the sender of the message it's attached to — only
+ * available where the query joins against `messages` (getMediaFilesForConversation),
+ * so it's a distinct type rather than a field on StoredMediaFile itself.
+ * Null for media with no messageId (e.g. live-merged items with no local
+ * message to join against) — treat as "sender unknown".
+ */
+export type StoredMediaFileWithSender = StoredMediaFile & {
+	senderId: number | null;
+};
+
 export type AlbumUpsertInput = {
 	albumId: string;
 	ownerProfileId: string | null;
@@ -111,6 +122,8 @@ export type AlbumMediaUpsertInput = {
 	thumbDataBase64: string | null;
 	remainingViews: number | null;
 	isViewable: boolean | null;
+	/** Item's slot in the album's actual order; omit/null to leave any existing value untouched. */
+	position?: number | null;
 };
 
 export type StoredAlbumMedia = {
@@ -122,6 +135,7 @@ export type StoredAlbumMedia = {
 	remainingViews: number | null;
 	isViewable: boolean | null;
 	fetchedAt: number | null;
+	position: number | null;
 };
 
 export type StoredAvatar = {
@@ -150,20 +164,3 @@ export type DownloadedMediaEntry = {
 	savedAt: number;
 };
 
-export type FullDbExport = {
-	version: 1;
-	exportedAt: number;
-	ownerUserId: number;
-	tables: {
-		conversations: Record<string, unknown>[];
-		conversation_meta: Record<string, unknown>[];
-		messages: Record<string, unknown>[];
-		media_files: Record<string, unknown>[];
-		albums: Record<string, unknown>[];
-		album_media: Record<string, unknown>[];
-		avatars: Record<string, unknown>[];
-		settings: Record<string, unknown>[];
-		saved_phrases: Record<string, unknown>[];
-		saved_locations: Record<string, unknown>[];
-	};
-};

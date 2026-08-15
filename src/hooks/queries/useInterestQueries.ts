@@ -3,7 +3,8 @@ import { useApiFunctions } from "../useApiFunctions";
 import { useEffect } from "react";
 import { TAP_RECEIVED_EVENT, VIEW_RECEIVED_EVENT } from "../../components/ChatRealtimeBridge";
 import { interestViewsStore } from "../../services/interestViewsStore";
-import { fromStoredView, toStoredView, normalizeViews, normalizeTaps } from "../../pages/app/interest/interestUtils";
+import { fromStoredView, toStoredView, normalizeViews, normalizeTaps, normalizeSentTaps, enrichSentTapsWithProfiles } from "../../pages/app/interest/interestUtils";
+import { getAllCachedBrowseCardsByImageHash, getAllCachedBrowseCardsById } from "../../pages/app/gridpage/cache";
 import { useTranslation } from "react-i18next";
 import { DEFAULT_STALE_TIME_MS } from "../../config/ui-constants";
 
@@ -16,18 +17,39 @@ export function useInterestData() {
 		queryKey: ["interest", "list"],
 		queryFn: async () => {
 			// 1. Parallel fetch from API
-			const [tapsResponse, viewsResponse] = await Promise.all([
+			const [tapsResponse, viewsResponse, sentTapsResponse] = await Promise.all([
 				api.getTaps(),
 				api.getViews(),
+				api.getSentTaps().catch(() => []),
 			]);
 
 			// 2. Load cached views from IndexedDB (persistence)
 			const cachedRows = await interestViewsStore.getAll();
 			const cachedViews = cachedRows.map(fromStoredView);
 
-			// 3. Normalize & Merge
-			const normalizedViews = normalizeViews(viewsResponse, cachedViews, t);
+			// 3. Normalize & Merge (recover locked preview entries by matching their
+			// image hash against profiles already seen in the browse grid)
+			const browseHashIndex = getAllCachedBrowseCardsByImageHash();
+			const browseMatches = new Map(
+				Array.from(browseHashIndex, ([hash, card]) => [
+					hash,
+					{
+						profileId: card.profileId,
+						displayName: card.displayName ?? null,
+						onlineUntil: card.onlineUntil ?? null,
+						rightNow: card.rightNow ?? null,
+					},
+				]),
+			);
+			const normalizedViews = normalizeViews(viewsResponse, cachedViews, t, browseMatches);
 			const normalizedTaps = normalizeTaps(tapsResponse, t);
+			const cacheResolvedSentTaps = normalizeSentTaps(sentTapsResponse, getAllCachedBrowseCardsById());
+			// Bulk-resolve anyone the browse-grid cache didn't recognize — the
+			// sent-taps endpoint only returns bare ids, unlike received taps/views.
+			const normalizedSentTaps = await enrichSentTapsWithProfiles(
+				cacheResolvedSentTaps,
+				api.getProfilesByIds,
+			);
 
 			// 4. Update persistence store with merged views
 			await interestViewsStore.upsertMany(
@@ -37,6 +59,7 @@ export function useInterestData() {
 			return {
 				taps: normalizedTaps,
 				views: normalizedViews,
+				sentTaps: normalizedSentTaps,
 				// Extract viewedCount from the raw response for the UI
 				viewedCount: (viewsResponse as any)?.totalViewers || (viewsResponse as any)?.data?.totalViewers || 0
 			};

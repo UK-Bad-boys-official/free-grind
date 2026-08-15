@@ -1,4 +1,4 @@
-import { Ban, Check, ChevronLeft, Ellipsis, Flame, MessageCircle, Pencil, Phone, StickyNote, Star, Trash2, Triangle, X, Zap } from "lucide-react";
+import { Album, Ban, Check, ChevronDown, ChevronLeft, ChevronUp, EllipsisVertical, Eye, EyeOff, Flame, Images, LockKeyhole, MessageCircle, Pencil, Phone, ShieldCheck, StickyNote, Star, Trash2, Triangle, X, Zap } from "lucide-react";
 import toast from "react-hot-toast";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -31,7 +31,10 @@ import {
 	getVaccineLabelMap,
 } from "../../profile-option-builders";
 import { getProfileImageUrl } from "../../../../utils/media";
+import { resolveAvatarSrc } from "../../../../services/avatarStore";
+import { getForbiddenWords, setForbiddenWords } from "../../../../utils/autoblock";
 import { ProfileImage } from "../../../../components/ui/profile-image";
+import { PromptDialog } from "../../../../components/ui/prompt-dialog";
 import freegrindLogo from "../../../../images/freegrind-logo.webp";
 import { FreeGrindBadge } from "../../../../components/FreeGrindBadge";
 import { usePreferences } from "../../../../contexts/PreferencesContext";
@@ -50,8 +53,12 @@ import {
 } from "../utils";
 import { ProfileDetailsContent } from "./ProfileDetailsContent";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
-import { PhotoViewer } from "../../../../components/PhotoViewer";
+import { PhotoViewer, type PhotoViewerMenuAction } from "../../../../components/PhotoViewer";
 import { PhotoActionBar } from "../../../../components/PhotoActionBar";
+import { useProfileAlbumStatus } from "../../../../hooks/useProfileAlbumStatus";
+import { captureAlbum, getLocalAlbum } from "../../../../services/albumStore";
+import type { AlbumViewer } from "../../../../types/shared-albums";
+import { saveAllAlbumMedia, saveAllMedia } from "../../../../utils/albumMedia";
 
 type OwnProfileData = { tags: string[] };
 const ownProfileDataCache = new Map<string, OwnProfileData>();
@@ -59,6 +66,15 @@ const ownProfileDataCache = new Map<string, OwnProfileData>();
 // Synthetic hash prepended to the photo carousel when the profile has an
 // active Right Now post with an image, so it shows as the first slide.
 const RIGHT_NOW_SLIDE_HASH = "__right_now_slide__";
+
+// Synthetic hash appended to the photo carousel when the profile has (or has
+// ever had) an album, so it shows as the last slide/indicator dot.
+const ALBUM_SLIDE_HASH = "__album_slide__";
+
+// Synthetic hash prepended when the profile has no real photo of its own
+// (and no Right Now slide either) — keeps the default-avatar placeholder as
+// its own slide instead of just disappearing once an album slide is added.
+const DEFAULT_PROFILE_SLIDE_HASH = "__default_profile_slide__";
 
 type ProfileDetailsModalProps = {
 	isOpen: boolean;
@@ -69,6 +85,9 @@ type ProfileDetailsModalProps = {
 	onTriangleProfile?: (profileId: string) => void;
 	onBlockProfile?: (profileId: string) => void;
 	onUnblockProfile?: (profileId: string) => void;
+	onHideProfile?: (profileId: string) => void;
+	onUnhideProfile?: (profileId: string) => void;
+	isHidden?: boolean;
 	onToggleFavoriteProfile?: (
 		profileId: string,
 		currentlyFavorite: boolean,
@@ -76,6 +95,9 @@ type ProfileDetailsModalProps = {
 	isFavorite?: boolean;
 	isTogglingFavorite?: boolean;
 	isBlocked?: boolean;
+	isBlockedByOther?: boolean;
+	isSnapshotProfile?: boolean;
+	isChatLinkedProfile?: boolean;
 	isBlockingProfile?: boolean;
 	isLocatingProfile?: boolean;
 	onTapProfile?: (profileId: string, tapId?: number) => void;
@@ -89,6 +111,7 @@ type ProfileDetailsModalProps = {
 	activeProfileError: string | null;
 	activeProfilePhotoHashes: string[];
 	chatContactStatus?: ChatContactIndexRecord | null;
+	localNickname?: string | null;
 	genderOptions: ManagedOption[];
 	pronounOptions: ManagedOption[];
 	variant?: "modal" | "page";
@@ -110,6 +133,47 @@ function normalizeMediaCreatedAt(value: unknown): number | null {
 	return numeric < 1_000_000_000_000 ? Math.round(numeric * 1000) : Math.round(numeric);
 }
 
+function ProfileDetailsSkeleton() {
+	return (
+		<div className="animate-pulse space-y-8 px-3" aria-hidden="true">
+			<div>
+				<div className="h-7 w-2/5 rounded-full bg-[var(--surface-2)]" />
+				<div className="mt-2.5 flex flex-wrap items-center gap-3">
+					<div className="h-3 w-20 rounded-full bg-[var(--surface-2)]" />
+					<div className="h-3 w-16 rounded-full bg-[var(--surface-2)]" />
+				</div>
+				<div className="mt-2 flex flex-wrap items-center gap-3">
+					<div className="h-3 w-12 rounded-full bg-[var(--surface-2)]" />
+					<div className="h-3 w-12 rounded-full bg-[var(--surface-2)]" />
+					<div className="h-3 w-12 rounded-full bg-[var(--surface-2)]" />
+				</div>
+			</div>
+
+			<div className="flex flex-wrap gap-2">
+				<div className="h-6 w-16 rounded-full bg-[var(--surface-2)]" />
+				<div className="h-6 w-20 rounded-full bg-[var(--surface-2)]" />
+				<div className="h-6 w-14 rounded-full bg-[var(--surface-2)]" />
+				<div className="h-6 w-24 rounded-full bg-[var(--surface-2)]" />
+			</div>
+
+			<div className="space-y-2.5">
+				<div className="h-3 w-full rounded-full bg-[var(--surface-2)]" />
+				<div className="h-3 w-5/6 rounded-full bg-[var(--surface-2)]" />
+				<div className="h-3 w-2/3 rounded-full bg-[var(--surface-2)]" />
+			</div>
+
+			<div className="space-y-3">
+				{Array.from({ length: 4 }).map((_, i) => (
+					<div key={i} className="flex items-center gap-2.5">
+						<div className="h-4 w-4 shrink-0 rounded bg-[var(--surface-2)]" />
+						<div className="h-3 w-1/3 rounded-full bg-[var(--surface-2)]" />
+					</div>
+				))}
+			</div>
+		</div>
+	);
+}
+
 export function ProfileDetailsModal({
 	isOpen,
 	onClose,
@@ -119,10 +183,16 @@ export function ProfileDetailsModal({
 	onTriangleProfile,
 	onBlockProfile,
 	onUnblockProfile,
+	onHideProfile,
+	onUnhideProfile,
+	isHidden = false,
 	onToggleFavoriteProfile,
 	isFavorite = false,
 	isTogglingFavorite = false,
 	isBlocked = false,
+	isBlockedByOther = false,
+	isSnapshotProfile = false,
+	isChatLinkedProfile = false,
 	isBlockingProfile = false,
 	isLocatingProfile = false,
 	onTapProfile,
@@ -136,6 +206,7 @@ export function ProfileDetailsModal({
 	activeProfileError,
 	activeProfilePhotoHashes,
 	chatContactStatus,
+	localNickname,
 	genderOptions,
 	pronounOptions,
 	variant = "modal",
@@ -143,7 +214,7 @@ export function ProfileDetailsModal({
 	onNextProfile,
 }: ProfileDetailsModalProps) {
 	const { t } = useTranslation();
-	const { unitsPreset } = usePreferences();
+	const { unitsPreset, showAlbumSensitiveContentWarning } = usePreferences();
 	const { userId } = useAuth();
 	const navigate = useNavigate();
 	const apiFunctions = useApiFunctions();
@@ -169,18 +240,26 @@ export function ProfileDetailsModal({
 			return t("profile_details.title");
 		}
 
+		const nickname = localNickname?.trim();
+		if (nickname) {
+			return nickname;
+		}
+
 		const value = activeProfile.displayName?.trim();
 		if (value) {
 			return value;
 		}
 
 		return t("profile_details.anonymous", "Someone");
-	}, [activeProfile, t]);
+	}, [activeProfile, localNickname, t]);
 
+	const messageProfileId = activeProfile?.profileId ?? selectedBrowseCard?.profileId ?? null;
+	const isOwnProfile = userId != null && messageProfileId != null && String(userId) === String(messageProfileId);
 	const profileDistance =
 		activeProfile?.distance ?? selectedBrowseCard?.distanceMeters ?? null;
-	const profileOnlineUntil =
-		activeProfile?.onlineUntil ?? selectedBrowseCard?.onlineUntil ?? null;
+	const profileOnlineUntil = isOwnProfile
+		? Date.now() + 60 * 60 * 1000
+		: (activeProfile?.onlineUntil ?? selectedBrowseCard?.onlineUntil ?? null);
 	const profileLastSeen = activeProfile?.seen ?? selectedBrowseCard?.lastOnline ?? null;
 	const profileStatusMeta = getOnlineStatusMeta(
 		profileLastSeen,
@@ -200,16 +279,15 @@ export function ProfileDetailsModal({
 		: profileStatusMeta.labelKey === "browse_page.status_minutes_ago" && (profileStatusMeta.count ?? 99) <= 10 ? "recent"
 		: "offline";
 	const estimatedCreatedAt = formatEstimatedAccountCreation(activeProfile?.profileId, t);
-	const messageProfileId = activeProfile?.profileId ?? selectedBrowseCard?.profileId ?? null;
 	const { data: travelPlans } = useTravelPlans(activeProfile?.profileId);
-	const isOwnProfile = userId != null && messageProfileId != null && String(userId) === String(messageProfileId);
 	const usesFreegrind = usePresenceCheck(messageProfileId);
 	const visualStateValue = typeof tapVisualState === "string" ? tapVisualState : tapVisualState.state;
 	const effectiveTapVisualState = isTappingProfile ? "single" : visualStateValue;
 	const isTapActive = effectiveTapVisualState !== "none";
-	const isTapDisabled = isOwnProfile || !onTapProfile || isTappingProfile || isTapBlocked;
+	const isProfileUnavailable = isBlocked || isSnapshotProfile;
+	const isTapDisabled = isOwnProfile || !onTapProfile || isTappingProfile || isTapBlocked || isProfileUnavailable;
 	const isTriangleDisabled =
-		!onTriangleProfile || !messageProfileId || isLocatingProfile;
+		!onTriangleProfile || !messageProfileId || isLocatingProfile || isProfileUnavailable;
 	const tapButtonClassName =
 		isTapActive
 			? "inline-flex h-16 w-16 items-center justify-center rounded-full border-2 border-[var(--accent)] bg-[var(--surface)] text-4xl leading-none text-[var(--text)] hover:brightness-110 overflow-hidden relative"
@@ -347,16 +425,19 @@ export function ProfileDetailsModal({
 	const inlineScrolled = headerOpacity > 0.5;
 	const [carouselDragDelta, setCarouselDragDelta] = useState(0);
 	const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+	const [banBioPrompt, setBanBioPrompt] = useState<{ text: string } | null>(null);
+	const [banNamePrompt, setBanNamePrompt] = useState<{ text: string } | null>(null);
 	const [quickMessageDraft, setQuickMessageDraft] = useState("");
 	const [barTapPickerOpen, setBarTapPickerOpen] = useState(false);
 	const [barInputVisible, setBarInputVisible] = useState(true);
 	const [barTapHoverId, setBarTapHoverId] = useState<number | null>(null);
-	const [barTapFlyEmoji, setBarTapFlyEmoji] = useState<{ id: number; key: number; particles: { dx: number; dy: number; size: number; dur: number; delay: number; emoji?: string }[] } | null>(null);
+	const [barTapFlyEmoji, setBarTapFlyEmoji] = useState<{ id: number; key: number; originDx: number; originDy: number; particles: { dx: number; dy: number; size: number; dur: number; delay: number; emoji?: string }[] } | null>(null);
 	const barTapLongPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const barTapStickyRef = useRef(false);
 	const barTapSkipUpRef = useRef(false);
 	const barInputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const barTapOptionsRef = useRef<HTMLDivElement>(null);
+	const barTapButtonRef = useRef<HTMLButtonElement>(null);
 	const controlsBarRef = useRef<HTMLDivElement>(null);
 	const actionsMenuRef = useRef<HTMLDivElement>(null);
 
@@ -430,6 +511,23 @@ export function ProfileDetailsModal({
 		} finally {
 			setIsSavingNote(false);
 		}
+	};
+
+	const hasBio = Boolean(activeProfile?.aboutMe?.trim());
+
+	const handleBanBioPhrase = () => {
+		setIsActionsMenuOpen(false);
+		const bio = activeProfile?.aboutMe || "";
+		if (!bio.trim()) { return; }
+		setBanBioPrompt({ text: bio });
+	};
+
+	const actualProfileName = activeProfile?.displayName?.trim() || "";
+
+	const handleBanProfileName = () => {
+		setIsActionsMenuOpen(false);
+		if (!actualProfileName) { return; }
+		setBanNamePrompt({ text: actualProfileName });
 	};
 
 	const notesSectionJsx = isFavorite && !isOwnProfile ? (
@@ -521,12 +619,12 @@ export function ProfileDetailsModal({
 			) : profileNote ? (
 				<div className="space-y-1.5">
 					<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3">
-						<p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--text)]">{profileNote}</p>
+						<p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--text)] select-text">{profileNote}</p>
 					</div>
 					{profilePhoneNumber && (
 						<div className="flex min-h-10 items-center gap-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3">
 							<Phone className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
-							<span className="text-sm text-[var(--text)]">{profilePhoneNumber}</span>
+							<span className="text-sm text-[var(--text)] select-text">{profilePhoneNumber}</span>
 						</div>
 					)}
 				</div>
@@ -624,7 +722,10 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 		const bridge = (window as any).FreeGrindBridge;
 		bridge?.vibrate?.(30) ?? navigator.vibrate?.([15, 10, 25]);
 		onTapProfile(String(messageProfileId), tapId);
-		setBarTapFlyEmoji({ id: tapId, key: Date.now(), particles: makeParticles(tapId) });
+		const btnRect = barTapButtonRef.current?.getBoundingClientRect();
+		const originDx = btnRect ? btnRect.left + btnRect.width / 2 - window.innerWidth / 2 : window.innerWidth / 2 - 110;
+		const originDy = btnRect ? btnRect.top + btnRect.height / 2 - window.innerHeight / 2 : window.innerHeight / 2 - 80;
+		setBarTapFlyEmoji({ id: tapId, key: Date.now(), originDx, originDy, particles: makeParticles(tapId) });
 		setBarTapPickerOpen(false);
 		setBarTapHoverId(null);
 		barTapStickyRef.current = false;
@@ -842,19 +943,56 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 	);
 	const rightNowSlideUrl = activeProfile?.rightNowFullImageUrl || activeProfile?.rightNowThumbnailUrl || null;
 
-	// The photo set shown in both carousels and the full-screen viewer, with
-	// the Right Now post's image (if any) prepended as the first slide.
-	const carouselHashes = useMemo(
-		() => (hasRightNowSlide ? [RIGHT_NOW_SLIDE_HASH, ...activeProfilePhotoHashes] : activeProfilePhotoHashes),
-		[hasRightNowSlide, activeProfilePhotoHashes],
+	// Lazily checked once this profile's detail view is open (not per grid
+	// tile) — hasAlbum is sticky (stays true once we've ever locally cached
+	// an album for this profile), hasSharedWithMe always reflects the latest
+	// live check and drives the lock-vs-cover decision on the slide.
+	const albumStatus = useProfileAlbumStatus(
+		messageProfileId != null ? String(messageProfileId) : null,
+		!isOwnProfile && messageProfileId != null,
 	);
-	const getSlideImageUrl = (hash: string) =>
-		hash === RIGHT_NOW_SLIDE_HASH ? (rightNowSlideUrl ?? "") : getProfileImageUrl(hash, "1024x1024");
+
+	// True only when there's genuinely nothing photo-like to show for this
+	// profile yet — mirrors the pre-album condition that used to gate the
+	// standalone default-avatar placeholder, so that behavior (no separate
+	// placeholder once a Right Now slide already fills that role) is unchanged.
+	const showDefaultProfileSlide = activeProfilePhotoHashes.length === 0 && !hasRightNowSlide;
+
+	// The photo set shown in both carousels and the full-screen viewer: the
+	// default-avatar placeholder (if there's no real photo or Right Now slide
+	// to show instead) first, then the Right Now post's image (if any), then
+	// the profile's own photos, then the album slide (if any) last.
+	const carouselHashes = useMemo(() => {
+		const base = hasRightNowSlide ? [RIGHT_NOW_SLIDE_HASH, ...activeProfilePhotoHashes] : activeProfilePhotoHashes;
+		const withDefault = showDefaultProfileSlide ? [DEFAULT_PROFILE_SLIDE_HASH, ...base] : base;
+		return albumStatus.hasAlbum ? [...withDefault, ALBUM_SLIDE_HASH] : withDefault;
+	}, [hasRightNowSlide, activeProfilePhotoHashes, albumStatus.hasAlbum, showDefaultProfileSlide]);
+	const getSlideImageUrl = (hash: string) => {
+		if (hash === RIGHT_NOW_SLIDE_HASH) return rightNowSlideUrl ?? "";
+		if (hash === ALBUM_SLIDE_HASH) return albumStatus.coverUrl ?? "";
+		if (hash === DEFAULT_PROFILE_SLIDE_HASH) return "";
+		const url = getProfileImageUrl(hash, "1024x1024");
+		return resolveAvatarSrc(hash, url, { cache: isChatLinkedProfile, sourceUrl: url }) ?? url;
+	};
+	// Same as getSlideImageUrl but for the smaller sizes used in the shared
+	// album locked-state backdrop — kept separate since a real hash is
+	// guaranteed here (no sentinel slide hashes to special-case).
+	const getPhotoUrlAtSize = (hash: string, size: "1024x1024" | "320x320") => {
+		const url = getProfileImageUrl(hash, size);
+		return resolveAvatarSrc(hash, url, { cache: isChatLinkedProfile, sourceUrl: url }) ?? url;
+	};
 	const isRightNowSlideActive = carouselHashes[mobileCarouselPhotoIndex] === RIGHT_NOW_SLIDE_HASH;
 	carouselTotalRef.current = carouselHashes.length;
 
+	// Excludes the album and default-avatar slides (always last/first, if
+	// present) — neither opens this generic photo viewer (album opens the
+	// album viewer, the default slide has no real photo to show fullscreen),
+	// and since PhotoViewer wraps navigation with modulo, leaving them in
+	// would let swiping past the boundary land on an unstyled "photo".
 	const photoUrls = useMemo(() => {
-		return carouselHashes.map((hash) => getSlideImageUrl(hash));
+		return carouselHashes
+			.filter((hash) => hash !== ALBUM_SLIDE_HASH && hash !== DEFAULT_PROFILE_SLIDE_HASH)
+			.map((hash) => getSlideImageUrl(hash));
 	}, [carouselHashes, rightNowSlideUrl]);
 
 	const renderPhotoExtraInfo = useCallback(
@@ -921,6 +1059,38 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 		setSelectedPhotoIndex(null);
 	};
 
+	// Own profile pictures aren't worth their own subfolder — there's only
+	// ever one "me" to organize by. Someone else's photos get filed under
+	// their profile id so saved pictures land sorted by person instead of
+	// all dumped in one flat folder.
+	const photoViewerFolderKey = !isOwnProfile && messageProfileId != null ? String(messageProfileId) : null;
+
+	const [isSavingAllPhotos, setIsSavingAllPhotos] = useState(false);
+
+	const handleSaveAllPhotos = useCallback(async () => {
+		if (isSavingAllPhotos || photoUrls.length === 0) return;
+		setIsSavingAllPhotos(true);
+		try {
+			await saveAllMedia(
+				photoUrls.map((url) => ({ url, type: "image" as const })),
+				photoViewerFolderKey,
+				t,
+			);
+		} finally {
+			setIsSavingAllPhotos(false);
+		}
+	}, [isSavingAllPhotos, photoUrls, photoViewerFolderKey, t]);
+
+	const photoMenuActions = useMemo<PhotoViewerMenuAction[]>(() => [
+		{
+			key: "save-all",
+			label: t("profile_details.save_all"),
+			icon: Images,
+			onClick: () => void handleSaveAllPhotos(),
+			disabled: isSavingAllPhotos || photoUrls.length === 0,
+		},
+	], [t, handleSaveAllPhotos, isSavingAllPhotos, photoUrls.length]);
+
 	const photoViewerOverlay = selectedPhotoIndex !== null && (
 		<PhotoViewer
 			isOpen={true}
@@ -929,8 +1099,304 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 			initialIndex={selectedPhotoIndex}
 			renderExtraInfo={renderPhotoExtraInfo}
 			renderFooter={renderPhotoFooter}
+			conversationId={photoViewerFolderKey}
+			menuActions={photoMenuActions}
 		/>
 	);
+
+	// Opening the album shared with this profile — mirrors
+	// SharedAlbumsPage.tsx's openViewer: mark it opened, fetch full content,
+	// fall back to whatever's already cached locally if the live fetch fails,
+	// and eagerly capture it so it survives the share later expiring.
+	const [albumViewer, setAlbumViewer] = useState<AlbumViewer | null>(null);
+	const [albumViewerIndex, setAlbumViewerIndex] = useState(0);
+	const [isOpeningAlbum, setIsOpeningAlbum] = useState(false);
+	const [isSavingAllAlbumMedia, setIsSavingAllAlbumMedia] = useState(false);
+	const albumViewerOpenRef = useRef(false);
+	albumViewerOpenRef.current = albumViewer != null;
+
+	useEffect(() => {
+		const onPopState = () => {
+			if (albumViewerOpenRef.current && !(window.history.state as { profileAlbumViewer?: boolean } | null)?.profileAlbumViewer) {
+				setAlbumViewer(null);
+				setAlbumViewerIndex(0);
+			}
+		};
+		window.addEventListener("popstate", onPopState);
+		return () => window.removeEventListener("popstate", onPopState);
+	}, []);
+
+	const closeAlbumViewer = useCallback(() => {
+		const state = window.history.state as Record<string, unknown> | null;
+		if (state?.profileAlbumViewer) {
+			const { profileAlbumViewer: _omit, ...rest } = state;
+			window.history.replaceState(rest, "");
+		}
+		setAlbumViewer(null);
+		setAlbumViewerIndex(0);
+	}, []);
+
+	const handleAlbumViewerIndexChange = useCallback((index: number) => {
+		setAlbumViewerIndex((prev) => (prev === index ? prev : index));
+	}, []);
+
+	const handleSaveAllAlbumMedia = useCallback(async () => {
+		if (!albumViewer || isSavingAllAlbumMedia) return;
+		setIsSavingAllAlbumMedia(true);
+		try {
+			await saveAllAlbumMedia(albumViewer, t);
+		} finally {
+			setIsSavingAllAlbumMedia(false);
+		}
+	}, [albumViewer, isSavingAllAlbumMedia, t]);
+
+	const albumMenuActions = useMemo<PhotoViewerMenuAction[]>(() => {
+		if (!albumViewer) return [];
+		return [
+			{
+				key: "save-all",
+				label: t("profile_details.save_all"),
+				icon: Images,
+				onClick: () => void handleSaveAllAlbumMedia(),
+				disabled: isSavingAllAlbumMedia || albumViewer.content.length === 0,
+			},
+		];
+	}, [albumViewer, isSavingAllAlbumMedia, t, handleSaveAllAlbumMedia]);
+
+	const sendAlbumContentReaction = useCallback(
+		async (albumId: number, albumContentId: number, targetProfileId: number) => {
+			try {
+				await apiFunctions.sendMessage({
+					type: "AlbumContentReaction",
+					target: { type: "Direct", targetId: targetProfileId },
+					body: { albumId, albumContentId },
+				});
+				toast.success(t("chat.toasts.album_reaction_sent", { defaultValue: "Reaction sent" }));
+			} catch (error) {
+				toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
+			}
+		},
+		[apiFunctions, t],
+	);
+
+	const sendAlbumContentReply = useCallback(
+		async (
+			albumId: number,
+			albumContentId: number,
+			contentType: string | null | undefined,
+			targetProfileId: number,
+			text: string,
+		) => {
+			try {
+				await apiFunctions.sendMessage({
+					type: "AlbumContentReply",
+					target: { type: "Direct", targetId: targetProfileId },
+					body: { albumId, albumContentId, albumContentReply: text, contentType: contentType ?? "image/jpeg" },
+				});
+				toast.success(t("chat.toasts.album_reply_sent", { defaultValue: "Reply sent" }));
+			} catch (error) {
+				toast.error(error instanceof Error ? error.message : t("chat.errors.send_failed"));
+			}
+		},
+		[apiFunctions, t],
+	);
+
+	const albumHeader = useMemo(() => {
+		if (!albumViewer) return undefined;
+		return {
+			avatarUrl: albumViewer.profileMediaHash
+				? getProfileImageUrl(albumViewer.profileMediaHash, "320x320")
+				: null,
+			name: albumViewer.profileName,
+			subtitle: [profileStatusLabel, profileDistance != null ? formatDistance(profileDistance, t, unitsPreset) : null]
+				.filter(Boolean)
+				.join(" · ") || null,
+			isOnline: profileStatusMeta.isOnline,
+		};
+	}, [albumViewer, profileStatusLabel, profileDistance, profileStatusMeta.isOnline, t, unitsPreset]);
+
+	const handleAlbumSlideClick = useCallback(async () => {
+		if (!albumStatus.hasSharedWithMe || albumStatus.albumId == null || isOpeningAlbum || messageProfileId == null) {
+			return;
+		}
+		const albumId = albumStatus.albumId;
+		const profileIdNum = Number(messageProfileId);
+		setIsOpeningAlbum(true);
+		try {
+			await apiFunctions.openSharedAlbum({ albumId });
+			const details = await apiFunctions.getAlbum(albumId);
+			setAlbumViewer({
+				albumId: details.albumId,
+				albumName: details.albumName,
+				profileId: profileIdNum,
+				profileName: activeProfileName,
+				profileMediaHash: activeProfilePhotoHashes[0] ?? null,
+				onlineUntil: profileOnlineUntil,
+				distanceMetres: profileDistance,
+				conversationId: null,
+				content: details.content,
+			});
+			setAlbumViewerIndex(0);
+			if (!(window.history.state as { profileAlbumViewer?: boolean } | null)?.profileAlbumViewer) {
+				window.history.pushState({ ...(window.history.state as object | null), profileAlbumViewer: true }, "");
+			}
+			void captureAlbum({
+				albumId: details.albumId,
+				albumName: details.albumName,
+				content: details.content,
+				ownerProfileId: String(messageProfileId),
+				conversationId: null,
+				sharedViaMessageId: null,
+				remainingViews: null,
+				isViewable: true,
+			});
+		} catch (error) {
+			const local = await getLocalAlbum(albumId).catch(() => null);
+			if (local && local.content.length > 0) {
+				setAlbumViewer({
+					albumId: local.albumId,
+					albumName: local.albumName,
+					profileId: profileIdNum,
+					profileName: activeProfileName,
+					profileMediaHash: activeProfilePhotoHashes[0] ?? null,
+					onlineUntil: profileOnlineUntil,
+					distanceMetres: profileDistance,
+					conversationId: null,
+					content: local.content,
+				});
+				setAlbumViewerIndex(0);
+				if (!(window.history.state as { profileAlbumViewer?: boolean } | null)?.profileAlbumViewer) {
+					window.history.pushState({ ...(window.history.state as object | null), profileAlbumViewer: true }, "");
+				}
+			} else {
+				toast.error(error instanceof Error ? error.message : t("shared_albums.error_open_fallback"));
+			}
+		} finally {
+			setIsOpeningAlbum(false);
+		}
+	}, [albumStatus.hasSharedWithMe, albumStatus.albumId, isOpeningAlbum, apiFunctions, messageProfileId, activeProfileName, activeProfilePhotoHashes, profileOnlineUntil, profileDistance, t]);
+
+	const albumViewerPhotos = useMemo(() => {
+		if (!albumViewer) return [];
+		return albumViewer.content.map((item) => ({
+			url: item.url || item.thumbUrl || item.coverUrl || "",
+			type: (item.contentType?.startsWith("video/") ? "video" : "image") as "image" | "video",
+		}));
+	}, [albumViewer]);
+
+	const albumOpeningOverlay = isOpeningAlbum && (
+		<div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/50 p-4">
+			<div className="surface-card p-4 text-sm text-[var(--text-muted)]">{t("shared_albums.opening")}</div>
+		</div>
+	);
+
+	const albumViewerOverlay = albumViewer && (
+		<PhotoViewer
+			isOpen={true}
+			onClose={closeAlbumViewer}
+			photos={albumViewerPhotos}
+			initialIndex={albumViewerIndex}
+			onIndexChange={handleAlbumViewerIndexChange}
+			menuActions={albumMenuActions}
+			albumHeader={albumHeader}
+			contentWarning={showAlbumSensitiveContentWarning}
+			renderFooter={(idx) => {
+				const item = albumViewer.content[idx];
+				if (!item || messageProfileId == null || isOwnProfile) return null;
+				const targetProfileId = Number(messageProfileId);
+				return (
+					<PhotoActionBar
+						onSendText={(text) =>
+							sendAlbumContentReply(albumViewer.albumId, item.contentId, item.contentType, targetProfileId, text)
+						}
+						onReact={() => sendAlbumContentReaction(albumViewer.albumId, item.contentId, targetProfileId)}
+					/>
+				);
+			}}
+		/>
+	);
+
+	// Shared between both the mobile/inline and split-desktop carousel
+	// blocks below — renders a slide's tappable content for a given hash,
+	// swapping in the album cover/lock overlay in place of a plain photo.
+	const renderCarouselSlideContent = (hash: string, index: number) => {
+		if (hash === DEFAULT_PROFILE_SLIDE_HASH) {
+			// Non-interactive, same as the old standalone placeholder — there's
+			// no real photo behind this slide to open a viewer for.
+			return (
+				<ProfileImage alt={t("profile_details.default_profile")} className="h-full w-full object-cover" />
+			);
+		}
+
+		if (hash === ALBUM_SLIDE_HASH) {
+			const isLocked = !albumStatus.hasSharedWithMe;
+			const primaryPhotoHash = activeProfilePhotoHashes[0];
+			const showAlbumCover = !isLocked && !!albumStatus.coverUrl;
+			return (
+				<>
+					<button
+						type="button"
+						onClick={() => void handleAlbumSlideClick()}
+						className="absolute inset-0 z-10"
+						aria-label={t(isLocked ? "profile_details.album_locked" : "profile_details.open_shared_album")}
+					/>
+					{showAlbumCover ? (
+						<img
+							src={albumStatus.coverUrl ?? undefined}
+							alt=""
+							className="h-full w-full scale-110 object-cover blur-[2px] brightness-[0.55]"
+						/>
+					) : (
+						<>
+							{/* Locked (or cover not loaded yet) — frosted-glass backdrop of
+							the profile's own picture (or the default avatar) instead of a
+							flat black background. */}
+							<ProfileImage
+								src={primaryPhotoHash ? getPhotoUrlAtSize(primaryPhotoHash, "1024x1024") : null}
+								alt=""
+								className="h-full w-full scale-110 object-cover blur-2xl brightness-[0.55]"
+							/>
+							<div className="pointer-events-none absolute inset-0 bg-black/25 backdrop-blur-sm" aria-hidden="true" />
+						</>
+					)}
+					<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+						{isLocked ? (
+							<div className="flex flex-col items-center gap-8">
+								<LockKeyhole className="h-10 w-10 text-white/90 drop-shadow-lg" />
+								<span className="text-xs font-bold uppercase tracking-wide text-white/90 drop-shadow-lg">
+									{t("profile_details.album_locked_label")}
+								</span>
+							</div>
+						) : (
+							<div className="h-20 w-20 overflow-hidden rounded-full ring-2 ring-white/80 shadow-xl">
+								<ProfileImage
+									src={primaryPhotoHash ? getPhotoUrlAtSize(primaryPhotoHash, "320x320") : null}
+									alt=""
+									className="h-full w-full object-cover"
+								/>
+							</div>
+						)}
+					</div>
+				</>
+			);
+		}
+
+		return (
+			<>
+				<button
+					type="button"
+					onClick={() => openPhotoViewer(index)}
+					className="absolute inset-0 z-10"
+					aria-label={t("profile_details.open_photo", { index: index + 1 })}
+				/>
+				<img
+					src={getSlideImageUrl(hash)}
+					alt={t("profile_details.photo_alt", { name: activeProfileName })}
+					className="h-full w-full object-cover"
+				/>
+			</>
+		);
+	};
 
 	const renderInlineLayout = () => (
 		<>
@@ -982,14 +1448,14 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 					)}
 					{messageProfileId && !isOwnProfile && (
 						<div className="flex shrink-0 items-center gap-1.5">
-							{onToggleFavoriteProfile && (
+							{onToggleFavoriteProfile && !isProfileUnavailable && (
 								<button
 									type="button"
 									onClick={() => onToggleFavoriteProfile(String(messageProfileId), isFavorite)}
 									disabled={isTogglingFavorite}
 									className={`inline-flex shrink-0 items-center justify-center rounded-xl border p-2 transition-colors disabled:opacity-60 ${
 										isFavorite
-											? inlineScrolled ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)]" : "border-white/70 bg-white/15 text-white backdrop-blur-md"
+											? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)]"
 											: inlineScrolled ? "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)] hover:text-[var(--text)]" : "border-white/45 bg-transparent text-white shadow-[0_10px_28px_-18px_rgba(0,0,0,0.95)] backdrop-blur-md"
 									}`}
 									aria-label={isFavorite ? t("chat.unfavorite") : t("chat.favorite")}
@@ -997,19 +1463,19 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 									<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 								</button>
 							)}
-							{(onBlockProfile || onUnblockProfile) && (
+							{(onBlockProfile || onUnblockProfile) && !isBlockedByOther && (
 								<button
 									type="button"
 									onClick={() => isBlocked ? onUnblockProfile?.(String(messageProfileId)) : (messageProfileId && onBlockProfile?.(String(messageProfileId)))}
 									disabled={isBlockingProfile}
 									className={`inline-flex shrink-0 items-center justify-center rounded-xl border p-2 transition-colors disabled:opacity-60 ${
 										isBlocked
-											? inlineScrolled ? "border-red-500/50 bg-red-500/10 text-red-400" : "border-red-400/60 bg-red-500/20 text-red-300 backdrop-blur-md"
+											? inlineScrolled ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400" : "border-emerald-400/60 bg-emerald-500/20 text-emerald-300 backdrop-blur-md"
 											: inlineScrolled ? "border-red-500/40 bg-red-500/8 text-red-400 hover:border-red-500/70 hover:bg-red-500/15" : "border-red-400/50 bg-red-500/15 text-red-300 backdrop-blur-md hover:border-red-400/80"
 									}`}
 									aria-label={isBlocked ? t("profile_details.unblock") : t("profile_details.block")}
 								>
-									<Ban className="h-4 w-4" />
+									{isBlocked ? <ShieldCheck className="h-4 w-4" /> : <Ban className="h-4 w-4" />}
 								</button>
 							)}
 							<div ref={actionsMenuRef} className="relative">
@@ -1020,10 +1486,11 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 									aria-label="More actions"
 									aria-expanded={isActionsMenuOpen}
 								>
-									<Ellipsis className="h-4 w-4" />
+									<EllipsisVertical className="h-4 w-4" />
 								</button>
 								{isActionsMenuOpen && (
-									<div className="absolute right-0 top-full z-50 mt-2 flex min-w-[190px] flex-col gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-lg">
+									<div className="absolute right-0 top-full z-50 mt-2 flex min-w-[190px] flex-col gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
+										<div className="flex flex-col gap-1 px-2">
 										<button
 											type="button"
 											disabled={isTriangleDisabled}
@@ -1033,6 +1500,49 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 											<Triangle className="mr-2 h-4 w-4 opacity-70" />
 											{isLocatingProfile ? t("profile_details.locating") : t("profile_details.locate")}
 										</button>
+										{(onHideProfile || onUnhideProfile) && (
+										<button
+											type="button"
+											disabled={isProfileUnavailable}
+											onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+											className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+										>
+											{isHidden ? <Eye className="mr-2 h-4 w-4 opacity-70" /> : <EyeOff className="mr-2 h-4 w-4 opacity-70" />}
+											{isHidden ? t("profile_details.unhide") : t("profile_details.hide")}
+										</button>
+										)}
+										</div>
+										{(hasBio || actualProfileName) && <div className="h-px shrink-0 bg-[var(--border)]" />}
+										{(hasBio || actualProfileName) && (
+										<div className="flex flex-col gap-1 px-2">
+										{hasBio && (
+											<button
+												type="button"
+												onClick={handleBanBioPhrase}
+												className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+											>
+												<Ban className="mr-2 h-4 w-4 opacity-70" />
+												<span className="flex flex-col">
+													<span>Add forbidden Keyword</span>
+													<span className="text-xs text-[var(--text-muted)]">Bio Phrase</span>
+												</span>
+											</button>
+										)}
+										{actualProfileName && (
+											<button
+												type="button"
+												onClick={handleBanProfileName}
+												className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+											>
+												<Ban className="mr-2 h-4 w-4 opacity-70" />
+												<span className="flex flex-col">
+													<span>Add forbidden Keyword</span>
+													<span className="text-xs text-[var(--text-muted)]">Profile Name</span>
+												</span>
+											</button>
+										)}
+										</div>
+										)}
 									</div>
 								)}
 							</div>
@@ -1043,6 +1553,13 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 
 			{/* Scrollable content — carousel first, profile details below */}
 			<div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-lenis-prevent>
+				{isLoadingActiveProfile && (
+					<div
+						className="animate-pulse bg-[var(--surface-2)]"
+						style={{ height: variant === "page" ? "min(78dvh, calc(100vw * 1.55))" : "min(55dvh, calc((100vw - 3rem) * 1.25))" }}
+						aria-hidden="true"
+					/>
+				)}
 				{!isLoadingActiveProfile && !activeProfileError && activeProfile && (
 					<div
 						ref={mobileCarouselRef}
@@ -1058,32 +1575,19 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 						)}
 						<div
 							className="pointer-events-none absolute inset-x-0 top-0 z-10"
-							style={{ height: "6rem", background: "linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, transparent 100%)" }}
+							style={{ height: "12rem", background: "linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)" }}
 							aria-hidden="true"
 						/>
-						{carouselHashes.length === 0 && (
-							<ProfileImage alt={t("profile_details.default_profile")} className="h-full w-full object-cover" />
-						)}
 						{carouselHashes.map((hash, index) => (
 							<div
 								key={hash}
-								className="absolute inset-0"
+								className="absolute inset-0 overflow-hidden"
 								style={{
 									transform: `translateY(calc(${(index - mobileCarouselPhotoIndex) * 100}% + ${carouselDragDelta}px))`,
 									transition: carouselDragDelta !== 0 ? "none" : "transform 300ms ease-out",
 								}}
 							>
-								<button
-									type="button"
-									onClick={() => openPhotoViewer(index)}
-									className="absolute inset-0 z-10"
-									aria-label={t("profile_details.open_photo", { index: index + 1 })}
-								/>
-								<img
-									src={getSlideImageUrl(hash)}
-									alt={t("profile_details.photo_alt", { name: activeProfileName })}
-									className="h-full w-full object-cover"
-								/>
+								{renderCarouselSlideContent(hash, index)}
 							</div>
 						))}
 						{activeProfile.lastReceivedTapTimestamp != null && (
@@ -1095,32 +1599,46 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							</div>
 						)}
 						{carouselHashes.length > 1 && (
-							<div className="pointer-events-none absolute inset-y-0 right-3 z-20 flex flex-col items-center justify-center">
+							<div className="absolute inset-y-0 right-3 z-20 flex flex-col items-center justify-center">
 								<div className="flex flex-col items-center gap-1.5 rounded-full bg-black/30 px-[5px] py-[10px] backdrop-blur-sm">
-									{carouselHashes.map((hash, index) =>
-										hash === RIGHT_NOW_SLIDE_HASH ? (
-											<span
-												key={`${hash}-dot`}
-												className="flex w-1.5 shrink-0 items-center justify-center overflow-visible transition-[height] duration-300 ease-out"
-												style={{ height: index === mobileCarouselPhotoIndex ? "12px" : "6px" }}
-												aria-hidden="true"
-											>
-												<Zap
-													className="h-3 w-3 shrink-0 scale-[0.55] transition-colors duration-150 ease-out"
-													style={{ color: index === mobileCarouselPhotoIndex ? "var(--right-now)" : "rgba(255,255,255,0.4)" }}
-													fill="currentColor"
+									{carouselHashes.map((hash, index) => (
+										<button
+											key={`${hash}-dot`}
+											type="button"
+											onClick={() => setMobileCarouselPhotoIndex(index)}
+											className="flex items-center justify-center p-1.5 -m-1.5"
+											aria-label={t("profile_details.open_photo", { index: index + 1 })}
+										>
+											{hash === RIGHT_NOW_SLIDE_HASH ? (
+												<span
+													className="flex w-1.5 shrink-0 items-center justify-center overflow-visible transition-[height] duration-300 ease-out"
+													style={{ height: index === mobileCarouselPhotoIndex ? "12px" : "6px" }}
+												>
+													<Zap
+														className="h-3 w-3 shrink-0 scale-[0.55] transition-colors duration-150 ease-out"
+														style={{ color: index === mobileCarouselPhotoIndex ? "var(--right-now)" : "rgba(255,255,255,0.4)" }}
+														fill="currentColor"
+													/>
+												</span>
+											) : hash === ALBUM_SLIDE_HASH ? (
+												<span
+													className="flex w-1.5 shrink-0 items-center justify-center overflow-visible transition-[height] duration-300 ease-out"
+													style={{ height: index === mobileCarouselPhotoIndex ? "12px" : "6px" }}
+												>
+													<Album
+														className="h-3 w-3 shrink-0 scale-[0.6] transition-colors duration-150 ease-out"
+														style={{ color: index === mobileCarouselPhotoIndex ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.4)" }}
+													/>
+												</span>
+											) : (
+												<span
+													className={`w-1.5 rounded-full transition-[height,background-color] duration-300 ease-out ${
+														index === mobileCarouselPhotoIndex ? "h-3 bg-white" : "h-1.5 bg-white/40"
+													}`}
 												/>
-											</span>
-										) : (
-											<span
-												key={`${hash}-dot`}
-												className={`w-1.5 rounded-full transition-[height,background-color] duration-300 ease-out ${
-													index === mobileCarouselPhotoIndex ? "h-3 bg-white" : "h-1.5 bg-white/40"
-												}`}
-												aria-hidden="true"
-											/>
-										)
-									)}
+											)}
+										</button>
+									))}
 								</div>
 							</div>
 						)}
@@ -1128,7 +1646,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 				)}
 				<div className={`p-4 sm:p-5 ${variant === "page" ? "pb-[calc(env(safe-area-inset-bottom,0px)+6rem)] sm:pb-[calc(env(safe-area-inset-bottom,0px)+6rem)]" : "pb-28"}`}>
 					{isLoadingActiveProfile ? (
-						<p className="text-sm text-[var(--text-muted)]">{t("profile_details.loading")}</p>
+						<ProfileDetailsSkeleton />
 					) : activeProfileError ? (
 						<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
 					) : activeProfile ? (
@@ -1180,6 +1698,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							ethnicityLabels={ethnicityLabels}
 							relationshipStatusLabels={relationshipStatusLabels}
 							extraTopSection={notesSectionJsx}
+							isChatLinkedProfile={isChatLinkedProfile}
 							hidePicturesSection={true}
 						/>
 					) : null}
@@ -1196,6 +1715,12 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 						background: "linear-gradient(to top, rgba(0,0,0,0.80) 0%, rgba(0,0,0,0.7) 45%, transparent 100%)",
 					}}
 				>
+					{isProfileUnavailable ? (
+						<div className="flex items-center justify-center gap-2 px-3 pb-1">
+							<ShieldCheck className="h-4 w-4 text-white/60" />
+							<p className="text-sm font-medium text-white/70">{t("profile_details.snapshot_banner.title")}</p>
+						</div>
+					) : (
 					<div
 						ref={controlsBarRef}
 						className="pointer-events-auto flex items-center gap-1 px-3"
@@ -1247,6 +1772,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							</div>
 						</div>
 						<button
+							ref={barTapButtonRef}
 							type="button"
 							onPointerDown={handleBarTapPointerDown}
 							onPointerMove={handleBarTapPointerMove}
@@ -1289,6 +1815,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							</button>
 						)}
 					</div>
+					)}
 				</div>
 			)}
 		</>
@@ -1311,6 +1838,42 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 				>
 				{renderInlineLayout()}
 				{photoViewerOverlay}
+				{albumOpeningOverlay}
+				{albumViewerOverlay}
+				<PromptDialog
+					isOpen={banBioPrompt !== null}
+					title={t("profile_details.ban_bio_title")}
+					message={t("profile_details.ban_bio_prompt")}
+					defaultValue={banBioPrompt?.text ?? ""}
+					confirmLabel={t("chat.actions.ban_word_confirm", { defaultValue: "Add" })}
+					cancelLabel={t("chat.actions.cancel")}
+					onConfirm={(wordToBan) => {
+						const currentList = getForbiddenWords();
+						const newList = currentList ? `${currentList}, ${wordToBan}` : wordToBan;
+						void setForbiddenWords(newList);
+						toast.success(t("profile_details.ban_bio_added", { word: wordToBan }));
+						setBanBioPrompt(null);
+					}}
+					onCancel={() => setBanBioPrompt(null)}
+				/>
+				<PromptDialog
+					isOpen={banNamePrompt !== null}
+					title={t("profile_details.ban_bio_title")}
+					message={t("chat.actions.ban_name_prompt", {
+						defaultValue: "Trim this down to the exact name or phrase you want to ban:",
+					})}
+					defaultValue={banNamePrompt?.text ?? ""}
+					confirmLabel={t("chat.actions.ban_word_confirm", { defaultValue: "Add" })}
+					cancelLabel={t("chat.actions.cancel")}
+					onConfirm={(wordToBan) => {
+						const currentList = getForbiddenWords();
+						const newList = currentList ? `${currentList}, ${wordToBan}` : wordToBan;
+						void setForbiddenWords(newList);
+						toast.success(t("profile_details.ban_bio_added", { word: wordToBan }));
+						setBanNamePrompt(null);
+					}}
+					onCancel={() => setBanNamePrompt(null)}
+				/>
 				{barTapFlyEmoji && (
 					<>
 						{barTapFlyEmoji.particles.map((p, i) => p.emoji ? (
@@ -1354,7 +1917,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 						<span
 							key={`emoji-${barTapFlyEmoji.key}`}
 							className="animate-tap-fly-center fixed pointer-events-none"
-							style={{ left: "50%", top: "50%", zIndex: 201, filter: barTapGlow(barTapFlyEmoji.id) }}
+							style={{ left: "50%", top: "50%", zIndex: 201, filter: barTapGlow(barTapFlyEmoji.id), "--tap-origin-dx": `${barTapFlyEmoji.originDx}px`, "--tap-origin-dy": `${barTapFlyEmoji.originDy}px` } as React.CSSProperties}
 						>
 							{barTapEmoji(barTapFlyEmoji.id)}
 						</span>
@@ -1380,6 +1943,9 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 				onClick={(event) => event.stopPropagation()}
 			>
 				{/* Left panel: full-height photo carousel (split mode only) */}
+				{isModalSplit && isLoadingActiveProfile && (
+					<div className="relative shrink-0 animate-pulse overflow-hidden bg-[var(--surface-2)]" style={{ width: "54%" }} aria-hidden="true" />
+				)}
 				{isModalSplit && !isLoadingActiveProfile && !activeProfileError && activeProfile && (
 					<div
 						className="relative shrink-0 overflow-hidden bg-black"
@@ -1397,32 +1963,16 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 								aria-hidden="true"
 							/>
 						)}
-						{carouselHashes.length === 0 && (
-							<ProfileImage
-								alt={t("profile_details.default_profile")}
-								className="h-full w-full object-cover brightness-50"
-							/>
-						)}
 						{carouselHashes.map((hash, index) => (
 							<div
 								key={hash}
-								className="absolute inset-0"
+								className="absolute inset-0 overflow-hidden"
 								style={{
 									transform: `translateY(${(index - mobileCarouselPhotoIndex) * 100}%)`,
 									transition: "transform 300ms ease-out",
 								}}
 							>
-								<button
-									type="button"
-									onClick={() => openPhotoViewer(index)}
-									className="absolute inset-0 z-10"
-									aria-label={t("profile_details.open_photo", { index: index + 1 })}
-								/>
-								<img
-									src={getSlideImageUrl(hash)}
-									alt={t("profile_details.photo_alt", { name: activeProfileName })}
-									className="h-full w-full object-cover"
-								/>
+								{renderCarouselSlideContent(hash, index)}
 							</div>
 						))}
 						{activeProfile.lastReceivedTapTimestamp != null && (
@@ -1436,32 +1986,68 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							</div>
 						)}
 						{carouselHashes.length > 1 && (
-							<div className="pointer-events-none absolute inset-y-0 right-4 z-20 flex flex-col items-center justify-center">
+							<>
+								<button
+									type="button"
+									onClick={() => setMobileCarouselPhotoIndex((i) => Math.max(i - 1, 0))}
+									disabled={mobileCarouselPhotoIndex === 0}
+									aria-label={t("profile_details.previous_photo")}
+									className="absolute left-1/2 top-3 z-20 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition hover:bg-black/60 disabled:opacity-0 disabled:pointer-events-none"
+								>
+									<ChevronUp className="h-4 w-4" />
+								</button>
+								<button
+									type="button"
+									onClick={() => setMobileCarouselPhotoIndex((i) => Math.min(i + 1, carouselHashes.length - 1))}
+									disabled={mobileCarouselPhotoIndex === carouselHashes.length - 1}
+									aria-label={t("profile_details.next_photo")}
+									className="absolute bottom-3 left-1/2 z-20 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition hover:bg-black/60 disabled:opacity-0 disabled:pointer-events-none"
+								>
+									<ChevronDown className="h-4 w-4" />
+								</button>
+							</>
+						)}
+						{carouselHashes.length > 1 && (
+							<div className="absolute inset-y-0 right-4 z-20 flex flex-col items-center justify-center">
 								<div className="flex flex-col items-center gap-2 rounded-full bg-black/30 px-[7px] py-[14px] backdrop-blur-sm">
-									{carouselHashes.map((hash, index) =>
-										hash === RIGHT_NOW_SLIDE_HASH ? (
-											<span
-												key={`${hash}-dot`}
-												className="flex w-2 shrink-0 items-center justify-center overflow-visible transition-[height] duration-300 ease-out"
-												style={{ height: index === mobileCarouselPhotoIndex ? "16px" : "8px" }}
-												aria-hidden="true"
-											>
-												<Zap
-													className="h-4 w-4 shrink-0 scale-[0.55] transition-colors duration-150 ease-out"
-													style={{ color: index === mobileCarouselPhotoIndex ? "var(--right-now)" : "rgba(255,255,255,0.4)" }}
-													fill="currentColor"
+									{carouselHashes.map((hash, index) => (
+										<button
+											key={`${hash}-dot`}
+											type="button"
+											onClick={() => setMobileCarouselPhotoIndex(index)}
+											className="flex items-center justify-center p-1.5 -m-1.5"
+											aria-label={t("profile_details.open_photo", { index: index + 1 })}
+										>
+											{hash === RIGHT_NOW_SLIDE_HASH ? (
+												<span
+													className="flex w-2 shrink-0 items-center justify-center overflow-visible transition-[height] duration-300 ease-out"
+													style={{ height: index === mobileCarouselPhotoIndex ? "16px" : "8px" }}
+												>
+													<Zap
+														className="h-4 w-4 shrink-0 scale-[0.55] transition-colors duration-150 ease-out"
+														style={{ color: index === mobileCarouselPhotoIndex ? "var(--right-now)" : "rgba(255,255,255,0.4)" }}
+														fill="currentColor"
+													/>
+												</span>
+											) : hash === ALBUM_SLIDE_HASH ? (
+												<span
+													className="flex w-2 shrink-0 items-center justify-center overflow-visible transition-[height] duration-300 ease-out"
+													style={{ height: index === mobileCarouselPhotoIndex ? "16px" : "8px" }}
+												>
+													<Album
+														className="h-4 w-4 shrink-0 scale-[0.65] transition-colors duration-150 ease-out"
+														style={{ color: index === mobileCarouselPhotoIndex ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.4)" }}
+													/>
+												</span>
+											) : (
+												<span
+													className={`w-2 rounded-full transition-[height,background-color] duration-300 ease-out ${
+														index === mobileCarouselPhotoIndex ? "h-4 bg-white" : "h-2 bg-white/40"
+													}`}
 												/>
-											</span>
-										) : (
-											<span
-												key={`${hash}-dot`}
-												className={`w-2 rounded-full transition-[height,background-color] duration-300 ease-out ${
-													index === mobileCarouselPhotoIndex ? "h-4 bg-white" : "h-2 bg-white/40"
-												}`}
-												aria-hidden="true"
-											/>
-										)
-									)}
+											)}
+										</button>
+									))}
 								</div>
 							</div>
 						)}
@@ -1488,34 +2074,78 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 									)}
 									{messageProfileId && !isOwnProfile && (
 										<div className="flex shrink-0 items-center gap-1.5">
-											{onToggleFavoriteProfile && (
+											{onToggleFavoriteProfile && !isProfileUnavailable && (
 												<button type="button" onClick={() => onToggleFavoriteProfile(String(messageProfileId), isFavorite)} disabled={isTogglingFavorite}
 													className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors disabled:opacity-60 ${isFavorite ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)]" : "border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)]"}`}
 													aria-label={isFavorite ? t("chat.unfavorite") : t("chat.favorite")}>
 													<Star className={`h-4 w-4 ${isFavorite ? "fill-current" : ""}`} />
 												</button>
 											)}
-											{(onBlockProfile || onUnblockProfile) && (
+											{(onBlockProfile || onUnblockProfile) && !isBlockedByOther && (
 												<button type="button" onClick={() => isBlocked ? onUnblockProfile?.(String(messageProfileId)) : (messageProfileId && onBlockProfile?.(String(messageProfileId)))} disabled={isBlockingProfile}
-													className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors disabled:opacity-60 ${isBlocked ? "border-red-500/50 bg-red-500/10 text-red-400" : "border-red-500/40 bg-red-500/8 text-red-400 hover:border-red-500/70 hover:bg-red-500/15"}`}
+													className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors disabled:opacity-60 ${isBlocked ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400" : "border-red-500/40 bg-red-500/8 text-red-400 hover:border-red-500/70 hover:bg-red-500/15"}`}
 													aria-label={isBlocked ? t("profile_details.unblock") : t("profile_details.block")}>
-													<Ban className="h-4 w-4" />
+													{isBlocked ? <ShieldCheck className="h-4 w-4" /> : <Ban className="h-4 w-4" />}
 												</button>
 											)}
 											<div ref={actionsMenuRef} className="relative">
 												<button type="button" onClick={() => setIsActionsMenuOpen((v) => !v)}
 													className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text)] transition-colors"
 													aria-label="More actions" aria-expanded={isActionsMenuOpen}>
-													<Ellipsis className="h-4 w-4" />
+													<EllipsisVertical className="h-4 w-4" />
 												</button>
 												{isActionsMenuOpen && (
-													<div className="absolute right-0 top-full z-50 mt-2 flex min-w-[190px] flex-col gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-lg">
+													<div className="absolute right-0 top-full z-50 mt-2 flex min-w-[190px] flex-col gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
+														<div className="flex flex-col gap-1 px-2">
 														<button type="button" disabled={isTriangleDisabled}
 															onClick={() => { setIsActionsMenuOpen(false); if (messageProfileId) onTriangleProfile?.(String(messageProfileId)); }}
 															className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50">
 															<Triangle className="mr-2 h-4 w-4 opacity-70" />
 															{isLocatingProfile ? t("profile_details.locating") : t("profile_details.locate")}
 														</button>
+														{(onHideProfile || onUnhideProfile) && (
+														<button
+															type="button"
+															disabled={isProfileUnavailable}
+															onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+															className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+														>
+															{isHidden ? <Eye className="mr-2 h-4 w-4 opacity-70" /> : <EyeOff className="mr-2 h-4 w-4 opacity-70" />}
+															{isHidden ? t("profile_details.unhide") : t("profile_details.hide")}
+														</button>
+														)}
+														</div>
+														{(hasBio || actualProfileName) && <div className="h-px shrink-0 bg-[var(--border)]" />}
+														{(hasBio || actualProfileName) && (
+														<div className="flex flex-col gap-1 px-2">
+														{hasBio && (
+															<button
+																type="button"
+																onClick={handleBanBioPhrase}
+																className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+															>
+																<Ban className="mr-2 h-4 w-4 opacity-70" />
+																<span className="flex flex-col">
+																	<span>Add forbidden Keyword</span>
+																	<span className="text-xs text-[var(--text-muted)]">Bio Phrase</span>
+																</span>
+															</button>
+														)}
+														{actualProfileName && (
+															<button
+																type="button"
+																onClick={handleBanProfileName}
+																className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)]"
+															>
+																<Ban className="mr-2 h-4 w-4 opacity-70" />
+																<span className="flex flex-col">
+																	<span>Add forbidden Keyword</span>
+																	<span className="text-xs text-[var(--text-muted)]">Profile Name</span>
+																</span>
+															</button>
+														)}
+														</div>
+														)}
 													</div>
 												)}
 											</div>
@@ -1527,7 +2157,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							<div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-lenis-prevent>
 								<div className="p-4 pb-28 sm:p-5 sm:pb-28">
 									{isLoadingActiveProfile ? (
-										<p className="text-sm text-[var(--text-muted)]">{t("profile_details.loading")}</p>
+										<ProfileDetailsSkeleton />
 									) : activeProfileError ? (
 										<p className="text-sm text-[var(--text-muted)]">{activeProfileError}</p>
 									) : activeProfile ? (
@@ -1577,6 +2207,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 											ethnicityLabels={ethnicityLabels}
 											relationshipStatusLabels={relationshipStatusLabels}
 											extraTopSection={notesSectionJsx}
+											isChatLinkedProfile={isChatLinkedProfile}
 											hidePicturesSection={true}
 										/>
 									) : null}
@@ -1585,6 +2216,12 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 							{/* Split-mode footer */}
 							{messageProfileId && !isOwnProfile && (
 								<div className="pointer-events-none absolute inset-x-0 bottom-0 z-30" style={{ paddingTop: "5rem", paddingBottom: "0.75rem", background: "linear-gradient(to top, rgba(0,0,0,0.80) 0%, rgba(0,0,0,0.7) 45%, transparent 100%)" }}>
+									{isProfileUnavailable ? (
+									<div className="flex items-center justify-center gap-2 px-3 pb-1">
+										<ShieldCheck className="h-4 w-4 text-white/60" />
+										<p className="text-sm font-medium text-white/70">{t("profile_details.snapshot_banner.title")}</p>
+									</div>
+									) : (
 									<div ref={controlsBarRef} className="pointer-events-auto flex items-center gap-1 px-3" onPointerDown={(e) => e.stopPropagation()}>
 										<div className="relative min-w-0 flex-1" style={{ pointerEvents: barInputVisible ? "auto" : "none" }}>
 											<div className="pointer-events-none absolute inset-0 rounded-xl backdrop-blur-md" style={{ background: "color-mix(in srgb, var(--surface-2) 50%, transparent)", border: "1px solid color-mix(in srgb, var(--border) 60%, transparent)", opacity: barInputVisible ? 1 : 0, transition: barInputVisible ? "opacity 0.25s" : "opacity 0.12s" }} />
@@ -1605,7 +2242,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 												))}
 											</div>
 										</div>
-										<button type="button" onPointerDown={handleBarTapPointerDown} onPointerMove={handleBarTapPointerMove} onPointerUp={handleBarTapPointerUp}
+										<button ref={barTapButtonRef} type="button" onPointerDown={handleBarTapPointerDown} onPointerMove={handleBarTapPointerMove} onPointerUp={handleBarTapPointerUp}
 											onPointerCancel={() => { setBarTapPickerOpen(false); setBarTapHoverId(null); barTapStickyRef.current = false; if (barTapLongPressRef.current) clearTimeout(barTapLongPressRef.current); barInputTimerRef.current = setTimeout(() => setBarInputVisible(true), 210); }}
 											disabled={isTapDisabled}
 											className={`tap-btn-base relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-none bg-transparent text-2xl leading-none transition-all touch-none select-none ${isTappingProfile ? "opacity-40" : ""} ${barTapPickerOpen ? "text-[var(--text-muted)]" : isTapActive || barTapHoverId !== null ? "text-white" : "text-[var(--text-muted)]"}`}
@@ -1626,6 +2263,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 											</button>
 										)}
 									</div>
+									)}
 								</div>
 							)}
 						</>
@@ -1664,13 +2302,49 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 					<span
 						key={`emoji-${barTapFlyEmoji.key}`}
 						className="animate-tap-fly-center fixed pointer-events-none"
-						style={{ left: "50%", top: "50%", zIndex: 201, filter: barTapGlow(barTapFlyEmoji.id) }}
+						style={{ left: "50%", top: "50%", zIndex: 201, filter: barTapGlow(barTapFlyEmoji.id), "--tap-origin-dx": `${barTapFlyEmoji.originDx}px`, "--tap-origin-dy": `${barTapFlyEmoji.originDy}px` } as React.CSSProperties}
 					>
 						{barTapEmoji(barTapFlyEmoji.id)}
 					</span>
 				</>
 			)}
 			{photoViewerOverlay}
+			{albumOpeningOverlay}
+			{albumViewerOverlay}
+			<PromptDialog
+				isOpen={banBioPrompt !== null}
+				title={t("profile_details.ban_bio_title")}
+				message={t("profile_details.ban_bio_prompt")}
+				defaultValue={banBioPrompt?.text ?? ""}
+				confirmLabel={t("chat.actions.ban_word_confirm", { defaultValue: "Add" })}
+				cancelLabel={t("chat.actions.cancel")}
+				onConfirm={(wordToBan) => {
+					const currentList = getForbiddenWords();
+					const newList = currentList ? `${currentList}, ${wordToBan}` : wordToBan;
+					void setForbiddenWords(newList);
+					toast.success(t("profile_details.ban_bio_added", { word: wordToBan }));
+					setBanBioPrompt(null);
+				}}
+				onCancel={() => setBanBioPrompt(null)}
+			/>
+			<PromptDialog
+				isOpen={banNamePrompt !== null}
+				title={t("profile_details.ban_bio_title")}
+				message={t("chat.actions.ban_name_prompt", {
+					defaultValue: "Trim this down to the exact name or phrase you want to ban:",
+				})}
+				defaultValue={banNamePrompt?.text ?? ""}
+				confirmLabel={t("chat.actions.ban_word_confirm", { defaultValue: "Add" })}
+				cancelLabel={t("chat.actions.cancel")}
+				onConfirm={(wordToBan) => {
+					const currentList = getForbiddenWords();
+					const newList = currentList ? `${currentList}, ${wordToBan}` : wordToBan;
+					void setForbiddenWords(newList);
+					toast.success(t("profile_details.ban_bio_added", { word: wordToBan }));
+					setBanNamePrompt(null);
+				}}
+				onCancel={() => setBanNamePrompt(null)}
+			/>
 		</div>
 	);
 }

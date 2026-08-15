@@ -1,10 +1,8 @@
 import i18n from "../../../i18n";
-import { useEffect, useState } from "react";
 import type { ConversationEntry, InboxFilters, Message } from "../../../types/messages";
 import type { InboxVisibilityFilter, UiMessage } from "../../../types/chat-page";
 import type { MediaKind } from "../../../types/chat-db";
 import {
-	getProfileImageUrl,
 	getThumbImageUrl,
 	validateMediaHash,
 } from "../../../utils/media";
@@ -24,6 +22,10 @@ export type ChatFiltersDraft = {
 	pinnedFilter: InboxVisibilityFilter;
 	archivedFilter: InboxVisibilityFilter;
 	hiddenFilter: InboxVisibilityFilter;
+	// Also local-only — there's no server concept of "last message isn't ours
+	// and we haven't replied yet", so this is re-checked against each cached
+	// conversation's preview.senderId, same as pinned/archived/hidden.
+	needsReplyOnly: boolean;
 };
 
 export type ChatFiltersVisibilityState = {
@@ -45,9 +47,32 @@ export function isNumberArray(value: unknown): value is number[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "number");
 }
 
+// How long a drawer item counts as "new" for sorting purposes. Within this
+// window it's kept above everything else regardless of send count — otherwise
+// a just-added photo (sendCount 0) would sit below every item ever sent even
+// once, however long ago. After the window it falls back to pure frequency.
+const NEW_DRAWER_MEDIA_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Sorts drawer media most-used first, but keeps recently added items pinned
+ * above the frequency-ranked ones for a grace period so they're actually
+ * visible right after being added instead of buried under old, low-use media. */
+export function sortDrawerMediaByUsage<T extends { sendCount: number; createdTs: number }>(
+	items: T[],
+	now = Date.now(),
+): T[] {
+	return [...items].sort((a, b) => {
+		const aIsNew = now - a.createdTs < NEW_DRAWER_MEDIA_WINDOW_MS;
+		const bIsNew = now - b.createdTs < NEW_DRAWER_MEDIA_WINDOW_MS;
+		if (aIsNew !== bIsNew) return aIsNew ? -1 : 1;
+		if (aIsNew) return b.createdTs - a.createdTs;
+		return b.sendCount - a.sendCount || b.createdTs - a.createdTs;
+	});
+}
+
 export function buildChatFiltersDraft(
 	filters: InboxFilters,
 	visibility: ChatFiltersVisibilityState = defaultChatFiltersVisibilityState,
+	needsReplyOnly = false,
 ): ChatFiltersDraft {
 	return {
 		unreadOnly: filters.unreadOnly === true,
@@ -63,6 +88,7 @@ export function buildChatFiltersDraft(
 		pinnedFilter: visibility.pinnedFilter,
 		archivedFilter: visibility.archivedFilter,
 		hiddenFilter: visibility.hiddenFilter,
+		needsReplyOnly,
 	};
 }
 
@@ -132,16 +158,7 @@ export async function buildBinaryUpload(file: File): Promise<{
 	};
 }
 
-const relativeTimeFormatterCache = new Map<string, Intl.RelativeTimeFormat>();
 const dateTimeFormatterCache = new Map<string, Intl.DateTimeFormat>();
-
-function getRelativeTimeFormatter(lng: string, options: Intl.RelativeTimeFormatOptions) {
-	const key = `${lng}-${JSON.stringify(options)}`;
-	if (!relativeTimeFormatterCache.has(key)) {
-		relativeTimeFormatterCache.set(key, new Intl.RelativeTimeFormat(lng, options));
-	}
-	return relativeTimeFormatterCache.get(key)!;
-}
 
 function getDateTimeFormatter(lng: string, options: Intl.DateTimeFormatOptions) {
 	const key = `${lng}-${JSON.stringify(options)}`;
@@ -177,6 +194,13 @@ export function formatMessageTime(
 	return new Date(timestamp).toLocaleTimeString([], {
 		hour: "2-digit",
 		minute: "2-digit",
+	});
+}
+
+export function formatFullDateTime(timestamp: number): string {
+	return new Date(timestamp).toLocaleString([], {
+		dateStyle: "medium",
+		timeStyle: "short",
 	});
 }
 
@@ -279,6 +303,20 @@ export function formatDateHeader(
 	return formatter.format(msgDate);
 }
 
+/**
+ * Whether a conversation is awaiting our reply: the last message is from the
+ * other participant and we haven't sent anything since. Distinct from
+ * unreadCount, which only tracks whether we've seen the message, not whether
+ * we've answered it.
+ */
+export function conversationNeedsReply(
+	conversation: ConversationEntry,
+	userId: number | null,
+): boolean {
+	const senderId = conversation.data.preview?.senderId;
+	return senderId != null && userId != null && Number(senderId) !== Number(userId);
+}
+
 export function getPreviewText(conversation: ConversationEntry, t: TranslateFn): string {
 	const preview = conversation.data.preview;
 	if (!preview) {
@@ -311,6 +349,8 @@ export function getPreviewText(conversation: ConversationEntry, t: TranslateFn):
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "VideoCall":
+			return t("chat.preview.video_call");
 		default:
 			return t("chat.preview.sent_message");
 	}
@@ -345,9 +385,45 @@ export function getMessagePreviewLabel(message: Message, t: TranslateFn): string
 			return t("chat.preview.sent_video");
 		case "Location":
 			return t("chat.preview.sent_location");
+		case "VideoCall":
+			return getVideoCallStatusLabel(message, t);
 		default:
 			return t("chat.preview.sent_message");
 	}
+}
+
+// Normalizes the various casings/spellings seen in real traffic for
+// VideoCallMessageBody.result (e.g. "Busy" vs "BUSY", "No_Answer" vs
+// "UNANSWERED") into one of a fixed set of outcome keys under
+// chat.video_call_status.*.
+const VIDEO_CALL_RESULT_KEYS: Record<string, string> = {
+	SUCCESSFUL: "successful",
+	BUSY: "busy",
+	CANCELLED: "cancelled",
+	DECLINED: "declined",
+	MISSED: "missed",
+	AB_UNSUPPORTED: "unsupported",
+	NO_ANSWER: "no_answer",
+	UNANSWERED: "no_answer",
+	LITE_UNSUPPORT: "unsupported",
+};
+
+export function formatCallDuration(totalSeconds: number): string {
+	const clamped = Number.isFinite(totalSeconds) && totalSeconds > 0 ? totalSeconds : 0;
+	const m = Math.floor(clamped / 60);
+	const s = Math.floor(clamped % 60);
+	return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// Body shape per VideoCallMessageBody (WIP, status-only): { result, videoCallDuration }.
+export function getVideoCallStatusLabel(message: Message, t: TranslateFn): string {
+	const body = message.body as Record<string, unknown> | null;
+	const rawResult = typeof body?.result === "string" ? body.result : "";
+	const duration = typeof body?.videoCallDuration === "number" ? body.videoCallDuration : 0;
+	const normalized = rawResult.toUpperCase().replace(/[^A-Z]/g, "_");
+	const outcome = VIDEO_CALL_RESULT_KEYS[normalized] ?? (duration > 0 ? "successful" : "generic");
+	const label = t(`chat.video_call_status.${outcome}`);
+	return outcome === "successful" && duration > 0 ? `${label} · ${formatCallDuration(duration)}` : label;
 }
 
 // Types getPreviewText/getMessagePreviewLabel can render a specific label
@@ -1019,7 +1095,7 @@ export function getParticipantAvatarUrl(hash: string | null | undefined): string
 		return null;
 	}
 
-	return getProfileImageUrl(hash);
+	return getThumbImageUrl(hash, "320x320");
 }
 
 export function isLocalClientMessageId(messageId: string): boolean {

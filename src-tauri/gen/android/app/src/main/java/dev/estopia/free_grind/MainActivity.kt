@@ -22,11 +22,10 @@ import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import android.widget.ImageView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
@@ -163,8 +162,15 @@ class MainActivity : TauriActivity() {
     installSplashScreen()
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // Resolved once up front: both the splash icon below and the Recents
+    // (task switcher) card need to match whichever disguise is currently
+    // active, since neither otherwise picks that up on their own (see
+    // AppDisguise.kt).
+    val activeDisguise = AppDisguise.currentDisguise(this)
+    AppDisguise.applyTaskDescription(this, activeDisguise)
     splashDialog = Dialog(this, R.style.SplashDialogTheme).apply {
       setContentView(R.layout.splash_overlay)
+      findViewById<ImageView>(R.id.splash_icon)?.setImageResource(activeDisguise.iconRes)
       setCancelable(false)
       window?.let { win ->
         win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
@@ -223,33 +229,6 @@ class MainActivity : TauriActivity() {
     }
     dispatchPendingPushNotifications()
     handleNotificationIntent(intent)
-    setupImeInsetsListener(webView)
-  }
-
-  private var lastDispatchedImeInsetPx = -1
-
-  private fun setupImeInsetsListener(webView: WebView) {
-    ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
-      val imeHeightPx = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-      if (imeHeightPx != lastDispatchedImeInsetPx) {
-        lastDispatchedImeInsetPx = imeHeightPx
-        val density = resources.displayMetrics.density
-        val imeHeightCss = if (density > 0f) imeHeightPx / density else imeHeightPx.toFloat()
-        dispatchKeyboardInsetToWebview(imeHeightCss)
-      }
-      insets
-    }
-    ViewCompat.requestApplyInsets(webView)
-  }
-
-  private fun dispatchKeyboardInsetToWebview(heightCss: Float) {
-    val script =
-      "(function(){" +
-      "window.dispatchEvent(new CustomEvent('fg:keyboard-inset', { detail: { height: $heightCss } }));" +
-      "})();"
-    runOnUiThread {
-      webViewRef?.evaluateJavascript(script, null)
-    }
   }
 
   override fun onResume() {
@@ -338,9 +317,27 @@ class MainActivity : TauriActivity() {
       }
     }
 
+    /**
+     * Called once the frontend has marked a conversation read (locally, or
+     * echoed back from the server via the chat.v1.conversation_read realtime
+     * event) so any already-shown system notification for it disappears
+     * instead of lingering until it's tapped.
+     */
+    @JavascriptInterface
+    fun clearConversationNotifications(conversationId: String?) {
+      val id = NotificationPoster.normalizeNullableString(conversationId) ?: return
+      cancelChatNotification(id)
+    }
+
     @JavascriptInterface
     fun checkMicrophonePermission(): Boolean {
       return checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    @JavascriptInterface
+    fun checkCameraPermission(): Boolean {
+      return checkSelfPermission(Manifest.permission.CAMERA) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
@@ -361,6 +358,29 @@ class MainActivity : TauriActivity() {
         android.content.pm.PackageManager.PERMISSION_GRANTED ||
         checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Switches the launcher icon/name to the given disguise id ("default",
+     * "calculator", "notes", "weather" — see AppDisguise.kt). Returns false
+     * for an unrecognized id instead of throwing.
+     */
+    @JavascriptInterface
+    fun setAppDisguise(id: String): Boolean {
+      val identity = AppDisguise.Identity.fromId(id) ?: return false
+      val success = AppDisguise.applyDisguise(this@MainActivity, identity)
+      if (success) {
+        // Updates the currently open Recents card immediately — the splash
+        // icon only needs to change on the *next* cold start, so that's
+        // read fresh in onCreate instead.
+        AppDisguise.applyTaskDescription(this@MainActivity, identity)
+      }
+      return success
+    }
+
+    @JavascriptInterface
+    fun getAppDisguise(): String {
+      return AppDisguise.currentDisguise(this@MainActivity).id
     }
 
     @JavascriptInterface
@@ -433,9 +453,13 @@ class MainActivity : TauriActivity() {
 
     // Note: We use the "_v2" suffix to ensure custom sound and high importance
     // settings are applied correctly even on devices that already had previous versions.
+    // Channel names come from the active AppDisguise identity — "Chat
+    // Messages"/"Taps" normally, something generic while a decoy is active
+    // (see AppDisguise.kt) so Android's own notification settings screen
+    // doesn't give the disguise away.
     val chatChannel = NotificationChannel(
-      "free_grind_chat_notifications_v2",
-      "Chat Messages",
+      AppDisguise.CHAT_CHANNEL_ID,
+      AppDisguise.channelName(this, isTap = false),
       NotificationManager.IMPORTANCE_HIGH
     ).apply {
       description = "Notifications for new chat messages"
@@ -445,8 +469,8 @@ class MainActivity : TauriActivity() {
     }
 
     val tapsChannel = NotificationChannel(
-      "free_grind_taps_notifications_v2",
-      "Taps",
+      AppDisguise.TAPS_CHANNEL_ID,
+      AppDisguise.channelName(this, isTap = true),
       NotificationManager.IMPORTANCE_HIGH
     ).apply {
       description = "Notifications for incoming taps"
@@ -613,8 +637,18 @@ class MainActivity : TauriActivity() {
       return
     }
 
+    cancelChatNotification(conversationId)
+  }
+
+  // Cancels using the exact (tag, id) pair NotificationPoster.postNotification
+  // used to post — notify()/cancel() only match a notification when both
+  // agree, so this must stay in sync with resolveNotificationKey there.
+  private fun cancelChatNotification(conversationId: String) {
     val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-    notificationManager.cancel(conversationId.hashCode())
+    notificationManager.cancel(
+      NotificationPoster.chatNotificationTag(conversationId),
+      NotificationPoster.NOTIFICATION_INSTANCE_ID,
+    )
   }
 
   private fun toOpenedPushPayload(payloadJson: String): String {

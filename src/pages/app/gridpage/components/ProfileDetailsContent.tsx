@@ -26,10 +26,10 @@ import {
 	Sparkles,
 	Syringe,
 	User,
-	Zap,
 } from "lucide-react";
 import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "react-hot-toast";
 import type { ProfileDetail } from "../../GridPage.types";
 import type { TravelPlan } from "../../../../types/travel";
 import {
@@ -43,17 +43,31 @@ import {
 } from "../utils";
 import { reverseGeocodeCityDistrictForGeohash } from "../geocoding";
 import { getProfileImageUrl, getThumbImageUrl } from "../../../../utils/media";
+import { resolveAvatarSrc } from "../../../../services/avatarStore";
 import { ProfileImage } from "../../../../components/ui/profile-image";
-import { FreeGrindBadge } from "../../../../components/FreeGrindBadge";
+import { RightNowIcon } from "../../../../components/icons/RightNowIcon";
+import freegrindLogo from "../../../../images/freegrind-logo.webp";
 import { TapSelector } from "./TapSelector";
 import type { ChatContactIndexRecord } from "../../../../types/chat-contact-index";
 import { formatRelativeTime } from "../../../../utils/relativeTime";
 import { usePreferences } from "../../../../contexts/PreferencesContext";
 import { formatTravelDateRange } from "../utils";
+import { decodeGeohash } from "../../../../utils/geohash";
+import { appLog } from "../../../../utils/logger";
+import { isIos } from "../../../../services/saveMedia";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 type LabelMap = Record<number, string>;
 
-function TravelPlanRow({ plan, t }: { plan: TravelPlan; t: ReturnType<typeof useTranslation>["t"] }) {
+function TravelPlanRow({
+	plan,
+	t,
+	isDesktopLike,
+}: {
+	plan: TravelPlan;
+	t: ReturnType<typeof useTranslation>["t"];
+	isDesktopLike: boolean;
+}) {
 	const [location, setLocation] = useState<string | null>(null);
 
 	useEffect(() => {
@@ -68,8 +82,27 @@ function TravelPlanRow({ plan, t }: { plan: TravelPlan; t: ReturnType<typeof use
 		};
 	}, [plan.geohash]);
 
+	const handleOpenMaps = () => {
+		const decoded = decodeGeohash(plan.geohash);
+		const lat = (decoded.lat[0] + decoded.lat[1]) / 2;
+		const lon = (decoded.lon[0] + decoded.lon[1]) / 2;
+		const url = isDesktopLike
+			? `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`
+			: isIos()
+			? `https://maps.apple.com/?ll=${lat},${lon}&q=${lat},${lon}`
+			: `geo:${lat},${lon}?q=${lat},${lon}`;
+		openUrl(url).catch((error) => {
+			appLog.error("Failed to open map URL", error);
+			window.open(url, "_blank");
+		});
+	};
+
 	return (
-		<div className="flex items-start gap-2.5">
+		<button
+			type="button"
+			onClick={handleOpenMaps}
+			className="flex w-full items-start gap-2.5 text-left transition hover:opacity-80"
+		>
 			<Plane className="mt-0.5 h-4 w-4 shrink-0 text-[var(--text-muted)]" />
 			<div className="min-w-0">
 				<p className="text-sm text-[var(--text)]">
@@ -82,7 +115,7 @@ function TravelPlanRow({ plan, t }: { plan: TravelPlan; t: ReturnType<typeof use
 					<p className="mt-1 text-sm italic text-[var(--text-muted)]">{plan.notes.trim()}</p>
 				)}
 			</div>
-		</div>
+		</button>
 	);
 }
 
@@ -135,6 +168,7 @@ type ProfileDetailsContentProps = {
 	extraTopSection?: ReactNode;
 	hidePicturesSection?: boolean;
 	onDragDeltaChange?: (delta: number) => void;
+	isChatLinkedProfile?: boolean;
 };
 
 export function ProfileDetailsContent({
@@ -186,8 +220,16 @@ export function ProfileDetailsContent({
 	extraTopSection,
 	hidePicturesSection = false,
 	onDragDeltaChange,
+	isChatLinkedProfile = false,
 }: ProfileDetailsContentProps) {
 	const { t } = useTranslation();
+	// Only chat partners get their photos locally cached (see avatarStore.ts) —
+	// ordinary Grid/Browse viewing stays uncached to avoid storing every photo
+	// of every profile a user swipes past.
+	const photoSrc = (hash: string, size: "1024x1024" | "320x320") => {
+		const url = size === "1024x1024" ? getProfileImageUrl(hash, size) : getThumbImageUrl(hash, size);
+		return resolveAvatarSrc(hash, url, { cache: isChatLinkedProfile, sourceUrl: url }) ?? url;
+	};
 	const { unitsPreset } = usePreferences();
 	const hasChatHistory = Boolean(chatContactStatus?.hasChatted) || (chatContactStatus?.unreadCount ?? 0) > 0;
 	const lastMessageLabel = formatRelativeTime(chatContactStatus?.lastMessageTimestamp ?? null);
@@ -317,7 +359,7 @@ export function ProfileDetailsContent({
 
 
 	return (
-		<div className="grid gap-8">
+		<div className="grid gap-8 @container">
 			{tapBurst && (
 				<div key={tapBurst.key} className="pointer-events-none fixed inset-0 z-50 overflow-hidden" aria-hidden>
 					<span className="absolute left-1/2 top-1/2 text-7xl animate-tap-burst">
@@ -352,7 +394,7 @@ export function ProfileDetailsContent({
 													aria-label={t("profile_details.open_photo", { index: index + 1 })}
 												/>
 												<img
-													src={getProfileImageUrl(hash, "1024x1024")}
+													src={photoSrc(hash, "1024x1024")}
 													alt={t("profile_details.photo_alt", { name: activeProfileName })}
 													className="h-full w-full object-cover"
 												/>
@@ -362,21 +404,27 @@ export function ProfileDetailsContent({
 										<div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-36 bg-gradient-to-b from-black/65 to-transparent" />
 									</div>
 									{activeProfilePhotoHashes.length > 1 && (
-										<div className="pointer-events-none absolute right-3 inset-y-0 z-20 flex flex-col items-center justify-center">
+										<div className="absolute right-3 inset-y-0 z-20 flex flex-col items-center justify-center">
 											<div className="flex flex-col items-center gap-1.5 rounded-full bg-black/30 px-[5px] py-[10px] backdrop-blur-sm">
 												{activeProfilePhotoHashes.map((hash, index) => (
-													<span
+													<button
 														key={`${hash}-dot`}
-														className={`w-1.5 rounded-full transition-[height,background-color] duration-300 ease-out ${index === mobileCarouselPhotoIndex ? "h-3 bg-white" : "h-1.5 bg-white/40"}`}
-														aria-hidden="true"
-													/>
+														type="button"
+														onClick={() => onPhotoIndexChange?.(index)}
+														className="flex items-center justify-center p-1.5 -m-1.5"
+														aria-label={t("profile_details.open_photo", { index: index + 1 })}
+													>
+														<span
+															className={`w-1.5 rounded-full transition-[height,background-color] duration-300 ease-out ${index === mobileCarouselPhotoIndex ? "h-3 bg-white" : "h-1.5 bg-white/40"}`}
+														/>
+													</button>
 												))}
 											</div>
 										</div>
 									)}
 								</div>
 
-								<div className="hidden grid-cols-3 gap-2 sm:grid sm:grid-cols-4 lg:grid-cols-6">
+								<div className="hidden grid-cols-3 gap-2 sm:grid sm:grid-cols-4 @3xl:grid-cols-6">
 									{activeProfilePhotoHashes.map((hash, index) => (
 										<button
 											type="button"
@@ -387,7 +435,7 @@ export function ProfileDetailsContent({
 										>
 											<div className="relative">
 												<img
-													src={getThumbImageUrl(hash, "320x320")}
+													src={photoSrc(hash, "320x320")}
 													alt={t("profile_details.photo_alt", { name: activeProfileName })}
 													className="aspect-square w-full object-cover"
 												/>
@@ -398,7 +446,7 @@ export function ProfileDetailsContent({
 								</div>
 							</>
 						) : (
-							<div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+							<div className="grid grid-cols-3 gap-2 sm:grid-cols-4 @3xl:grid-cols-6">
 								{activeProfilePhotoHashes.map((hash, index) => (
 									<button
 										type="button"
@@ -409,7 +457,7 @@ export function ProfileDetailsContent({
 									>
 										<div className="relative">
 											<img
-												src={getThumbImageUrl(hash, "320x320")}
+												src={photoSrc(hash, "320x320")}
 												alt={t("profile_details.photo_alt", { name: activeProfileName })}
 												className="aspect-square w-full object-cover"
 											/>
@@ -468,8 +516,17 @@ export function ProfileDetailsContent({
 							)}
 							{hasRightNow && (
 								<span className="flex items-center gap-1 font-semibold" style={{ color: "var(--right-now)" }}>
-									<Zap className="h-3.5 w-3.5" />
-									{t("profile_details.right_now")}
+									{isRightNowHosting ? (
+										<>
+											<Home className="h-3.5 w-3.5" />
+											{t("right_now.hosting")}
+										</>
+									) : (
+										<>
+											<RightNowIcon className="h-3.5 w-3.5" />
+											{t("profile_details.right_now")}
+										</>
+									)}
 								</span>
 							)}
 							{profileDistance !== undefined && profileDistance !== null && (
@@ -484,12 +541,18 @@ export function ProfileDetailsContent({
 									{t("profile_details.recently_joined")}
 								</span>
 							)}
+							{usesFreegrind && (
+								<span className="flex items-center gap-1 font-semibold" style={{ color: "#FF8C00" }}>
+									<img src={freegrindLogo} alt="" className="h-3.5 w-3.5 object-contain" />
+									{t("profile_details.uses_free_grind")}
+								</span>
+							)}
 						</div>
 						{(PositionIcon != null && !shouldHideField(formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels)) || !shouldHideField(formatHeightCm(activeProfile.height, t, unitsPreset)) || !shouldHideField(formatWeightKg(activeProfile.weight, t, unitsPreset)) || !shouldHideField(formatEnumValue(activeProfile.bodyType, bodyTypeLabels, t))) && (
 							<div className="mt-1 flex items-center gap-x-3 text-sm text-[var(--text-muted)]">
 								{PositionIcon != null && !shouldHideField(formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels)) && (
 									<span className="flex items-center gap-1">
-										<PositionIcon className="h-3.5 w-3.5" />
+										<PositionIcon className="h-3.5 w-3.5 -translate-x-px" />
 										{formatEnumValue(activeProfile.sexualPosition, sexualPositionLabels, t)}
 									</span>
 								)}
@@ -514,9 +577,6 @@ export function ProfileDetailsContent({
 							</div>
 						)}
 					</div>
-					{usesFreegrind && (
-						<FreeGrindBadge size="lg" title={t("profile_details.uses_free_grind")} className="mt-1" />
-					)}
 				</div>
 				{hasChatHistory && (
 					<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--text-muted)]">
@@ -526,9 +586,6 @@ export function ProfileDetailsContent({
 								? t("profile_details.last_message", { time: lastMessageLabel })
 								: t("profile_details.chatted_before")
 							}
-							{(chatContactStatus?.unreadCount ?? 0) > 0
-								? ` · ${chatContactStatus?.unreadCount ?? 0} ${t("chat.unread")}`
-								: ""}
 						</span>
 					</div>
 				)}
@@ -557,8 +614,8 @@ export function ProfileDetailsContent({
 
 			{extraTopSection}
 
-			{(hasTagsContent || hasAboutContent || hasExpectationsFields || hasHealthFields || hasRightNowDetail || hasStatsFields || hasSocialFields) && (
-			<div className="grid gap-8 px-3 lg:grid-cols-[1.25fr_1fr]">
+			{(hasTagsContent || hasAboutContent || hasExpectationsFields || hasHealthFields || hasRightNowDetail || hasStatsFields || hasSocialFields || hasTravelPlans) && (
+			<div className="grid gap-8 px-3">
 				{(hasTagsContent || hasAboutContent || hasRightNowDetail || hasExpectationsFields || hasHealthFields) && (
 				<div className="grid gap-8">
 					{hasRightNowDetail && (
@@ -568,12 +625,6 @@ export function ProfileDetailsContent({
 								style={{ color: "var(--right-now)" }}
 							>
 								{t("profile_details.right_now")}
-								{isRightNowHosting && (
-									<>
-										<span aria-hidden="true">·</span>
-										<Home className="h-3.5 w-3.5" aria-label={t("right_now.hosting")} />
-									</>
-								)}
 							</p>
 							<div
 								className="rounded-xl px-4 py-3"
@@ -582,7 +633,7 @@ export function ProfileDetailsContent({
 									border: "1px solid color-mix(in srgb, var(--right-now), transparent 70%)",
 								}}
 							>
-								<p className="whitespace-pre-wrap text-base leading-relaxed text-[var(--text)]">{rightNowTextTrimmed}</p>
+								<p className="whitespace-pre-wrap text-base leading-relaxed text-[var(--text)] select-text">{rightNowTextTrimmed}</p>
 							</div>
 						</div>
 					)}
@@ -624,7 +675,7 @@ export function ProfileDetailsContent({
 								{t("profile_details.about")}
 							</p>
 							<div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3">
-								<p className="whitespace-pre-wrap text-base leading-relaxed text-[var(--text)]">
+								<p className="whitespace-pre-wrap text-base leading-relaxed text-[var(--text)] select-text">
 									{activeProfile.aboutMe?.trim()}
 								</p>
 							</div>
@@ -752,7 +803,7 @@ export function ProfileDetailsContent({
 				</div>
 				)}
 
-				{(hasStatsFields || hasSocialFields) && (
+				{(hasStatsFields || hasTravelPlans || hasSocialFields) && (
 				<div className="grid gap-8">
 					{hasStatsFields && (
 						<div>
@@ -796,6 +847,19 @@ export function ProfileDetailsContent({
 										<p className="text-sm text-[var(--text-muted)]">{formatEnumValue(activeProfile.relationshipStatus, relationshipStatusLabels, t)}</p>
 									</div>
 								)}
+							</div>
+						</div>
+					)}
+
+					{hasTravelPlans && (
+						<div>
+							<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+								{t("profile_details.travel_plans")}
+							</p>
+							<div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3">
+								{visibleTravelPlans.map((plan) => (
+									<TravelPlanRow key={plan.travelPlanId} plan={plan} t={t} isDesktopLike={isDesktopLike} />
+								))}
 							</div>
 						</div>
 					)}
@@ -856,28 +920,26 @@ export function ProfileDetailsContent({
 			</div>
 			)}
 
-			{hasTravelPlans && (
-				<div className="px-3">
-					<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
-						{t("profile_details.travel_plans")}
-					</p>
-					<div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3">
-						{visibleTravelPlans.map((plan) => (
-							<TravelPlanRow key={plan.travelPlanId} plan={plan} t={t} />
-						))}
-					</div>
-				</div>
-			)}
-
 			<div className="px-3">
 				<p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
 					{t("profile_details.account_info")}
 				</p>
 				<div className="space-y-2.5">
-					<div className="flex items-center gap-2.5">
+					<button
+						type="button"
+						onClick={async () => {
+							try {
+								await navigator.clipboard.writeText(String(activeProfile.profileId));
+								toast.success(t("profile_details.profile_id_copied"));
+							} catch (error) {
+								appLog.error("Failed to copy profile ID to clipboard", error);
+							}
+						}}
+						className="flex cursor-pointer items-center gap-2.5 text-left"
+					>
 						<Hash className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
-						<p className="text-sm text-[var(--text-muted)]">{activeProfile.profileId}</p>
-					</div>
+						<p className="text-sm text-[var(--text-muted)] select-text">{activeProfile.profileId}</p>
+					</button>
 					<div className="flex items-center gap-2.5">
 						<Calendar className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
 						<p className="text-sm text-[var(--text-muted)]">{t("profile_details.estimated_joined", { date: estimatedCreatedAt })}</p>

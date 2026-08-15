@@ -1,9 +1,10 @@
 import type { TFunction } from "i18next";
 import { formatRelativeTime } from "../../../utils/relativeTime";
 import type { StoredInterestView } from "../../../services/interestViewsStore";
-import { validateMediaHash } from "../../../utils/media";
+import { validateMediaHash, extractMediaHashFromUrl } from "../../../utils/media";
+import type { BrowseCard } from "../GridPage.types";
 
-export type InterestTab = "views" | "taps";
+export type InterestTab = "views" | "taps" | "sent";
 
 export type InterestItem = {
 	profileId: string;
@@ -15,7 +16,9 @@ export type InterestItem = {
 	canOpenProfile: boolean;
 	isFromCache?: boolean;
 	isMutual?: boolean;
+	isRead?: boolean;
 	onlineUntil?: number | null;
+	rightNow?: string | null;
 };
 
 export const PREVIEW_ID_PREFIX = "preview:";
@@ -36,14 +39,14 @@ export function fromStoredView(row: StoredInterestView): InterestItem {
 export function toStoredView(item: InterestItem): Omit<StoredInterestView, "updatedAt"> {
 	return {
 		profileId: item.profileId,
-		displayName: item.displayName,
+		displayName: item.displayName ?? "",
 		imageHash: item.imageHash,
 		timestamp: item.timestamp,
 		viewCount: item.viewCount,
 	};
 }
 
-function isPlaceholderName(name: string, profileId: string): boolean {
+function isPlaceholderName(name: string | null, profileId: string): boolean {
 	return name === `Profile ${profileId}`;
 }
 
@@ -78,6 +81,7 @@ function mergeViewItem(
 		isFromCache: incoming.isFromCache ?? cached.isFromCache,
 		isMutual: incoming.isMutual ?? cached.isMutual,
 		onlineUntil: incoming.onlineUntil ?? cached.onlineUntil,
+		rightNow: incoming.rightNow ?? cached.rightNow,
 	};
 }
 
@@ -111,7 +115,7 @@ export function toNumber(value: unknown): number | null {
 	return null;
 }
 
-function getItemDisplayName(entry: Record<string, unknown>, profileId: string): string | null {
+function getItemDisplayName(entry: Record<string, unknown>): string | null {
 	const value = entry.displayName;
 	if (typeof value === "string" && value.trim().length > 0) {
 		return value;
@@ -127,6 +131,10 @@ function getItemImageHash(entry: Record<string, unknown>): string | null {
 		}
 	}
 	return null;
+}
+
+function getItemRightNow(entry: Record<string, unknown>): string | null {
+	return typeof entry.rightNow === "string" ? entry.rightNow : null;
 }
 
 function getItemTimestamp(entry: Record<string, unknown>): number | null {
@@ -181,10 +189,18 @@ function getPreviewSyntheticId(
 	return `${PREVIEW_ID_PREFIX}${hash}:${seen}:${index}`;
 }
 
+export type BrowseHashMatch = {
+	profileId: string;
+	displayName: string | null;
+	onlineUntil: number | null;
+	rightNow: string | null;
+};
+
 export function normalizeViews(
 	payload: unknown,
 	previouslyCached: InterestItem[],
-	t: TFunction
+	_t: TFunction,
+	browseHashIndex?: Map<string, BrowseHashMatch>,
 ): InterestItem[] {
 	const root = asObject(payload);
 	if (!root) return previouslyCached;
@@ -193,8 +209,27 @@ export function normalizeViews(
 	const profilesRaw = Array.isArray(root.profiles) ? root.profiles : Array.isArray(dataRoot?.profiles) ? dataRoot.profiles : [];
 	const previewsRaw = Array.isArray(root.previews) ? root.previews : Array.isArray(dataRoot?.previews) ? dataRoot.previews : [];
 
-	// 1. Helper map for quick access to known profiles (by hash)
+	// 1. Helper map for quick access to known profiles (by hash).
+	// Seed from the browse grid first (weaker signal — just an identity guess),
+	// then let previously-resolved interest entries override on hash collision
+	// since those carry richer, interest-specific data.
 	const hashToProfile = new Map<string, InterestItem>();
+	if (browseHashIndex) {
+		for (const [hash, match] of browseHashIndex) {
+			hashToProfile.set(hash, {
+				profileId: match.profileId,
+				displayName: match.displayName,
+				imageHash: hash,
+				timestamp: null,
+				tapType: null,
+				viewCount: null,
+				canOpenProfile: true,
+				isFromCache: true,
+				onlineUntil: match.onlineUntil,
+				rightNow: match.rightNow,
+			});
+		}
+	}
 	for (const item of previouslyCached) {
 		if (item.imageHash && !item.profileId.startsWith(PREVIEW_ID_PREFIX)) {
 			hashToProfile.set(item.imageHash, item);
@@ -202,14 +237,14 @@ export function normalizeViews(
 	}
 
 	// 2. Normalize raw data from server
-	const incomingProfiles = profilesRaw.map(entry => {
+	const incomingProfiles = profilesRaw.map((entry): InterestItem | null => {
 		const obj = getViewEntryRecord(entry);
 		if (!obj) return null;
 		const profileId = getViewProfileId(obj);
 		if (!profileId) return null;
 		return {
 			profileId,
-			displayName: getItemDisplayName(obj, profileId),
+			displayName: getItemDisplayName(obj),
 			imageHash: getItemImageHash(obj),
 			timestamp: getItemTimestamp(obj),
 			tapType: null,
@@ -217,10 +252,11 @@ export function normalizeViews(
 			canOpenProfile: true,
 			isFromCache: false,
 			onlineUntil: toNumber(obj.onlineUntil),
+			rightNow: getItemRightNow(obj),
 		};
 	}).filter((it): it is InterestItem => it !== null);
 
-	const incomingPreviews = previewsRaw.map((entry, index) => {
+	const incomingPreviews = previewsRaw.map((entry, index): InterestItem | null => {
 		const obj = getViewEntryRecord(entry);
 		if (!obj) return null;
 		const imageHash = getItemImageHash(obj);
@@ -240,6 +276,7 @@ export function normalizeViews(
 			canOpenProfile: recoveredMatch ? true : (getViewProfileId(obj) !== null),
 			isFromCache: !!recoveredMatch,
 			onlineUntil: recoveredMatch ? recoveredMatch.onlineUntil : toNumber(obj.onlineUntil),
+			rightNow: recoveredMatch ? recoveredMatch.rightNow : getItemRightNow(obj),
 		};
 	}).filter((it): it is InterestItem => it !== null);
 
@@ -251,8 +288,23 @@ export function normalizeViews(
 		mergedMap.set(item.profileId, item);
 	}
 
+	// Stale synthetic preview IDs (e.g. from before this hash was resolvable) keyed by
+	// hash, so a newly-recovered real ID for the same hash can evict its old locked twin.
+	const staleSyntheticIdByHash = new Map<string, string>();
+	for (const item of previouslyCached) {
+		if (item.profileId.startsWith(PREVIEW_ID_PREFIX) && item.imageHash) {
+			staleSyntheticIdByHash.set(item.imageHash, item.profileId);
+		}
+	}
+
 	// Then fresh profiles/previews from server (overwrite old items with new timestamps)
-	for (const incoming of [...incomingProfiles, incomingPreviews].flat()) {
+	for (const incoming of [...incomingProfiles, ...incomingPreviews]) {
+		if (!incoming.profileId.startsWith(PREVIEW_ID_PREFIX) && incoming.imageHash) {
+			const staleId = staleSyntheticIdByHash.get(incoming.imageHash);
+			if (staleId && staleId !== incoming.profileId) {
+				mergedMap.delete(staleId);
+			}
+		}
 		const existing = mergedMap.get(incoming.profileId);
 		mergedMap.set(incoming.profileId, mergeViewItem(existing ?? null, incoming));
 	}
@@ -260,7 +312,7 @@ export function normalizeViews(
 	return Array.from(mergedMap.values()).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
 }
 
-export function normalizeTaps(payload: unknown, t: TFunction): InterestItem[] {
+export function normalizeTaps(payload: unknown, _t: TFunction): InterestItem[] {
 	const root = asObject(payload);
 	if (!root || !Array.isArray(root.profiles)) return [];
 
@@ -274,7 +326,7 @@ export function normalizeTaps(payload: unknown, t: TFunction): InterestItem[] {
 
 		const incoming: InterestItem = {
 			profileId,
-			displayName: getItemDisplayName(obj, profileId),
+			displayName: getItemDisplayName(obj),
 			imageHash: getItemImageHash(obj),
 			timestamp: getItemTimestamp(obj),
 			tapType: toNumber(obj.tapType),
@@ -282,6 +334,7 @@ export function normalizeTaps(payload: unknown, t: TFunction): InterestItem[] {
 			canOpenProfile: true,
 			isMutual: obj.isMutual === true || obj.mutual === true,
 			onlineUntil: toNumber(obj.onlineUntil),
+			rightNow: getItemRightNow(obj),
 		};
 
 		const existing = mergedMap.get(profileId);
@@ -292,6 +345,113 @@ export function normalizeTaps(payload: unknown, t: TFunction): InterestItem[] {
 	}
 
 	return Array.from(mergedMap.values()).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+}
+
+/**
+ * The sent-taps endpoint only returns bare IDs (no name/photo), unlike
+ * received taps/views which come back pre-enriched. Recover a display name
+ * and image the same way locked view-previews are recovered — by matching
+ * against profiles already seen in the browse grid — keyed by profile ID
+ * here since we already have a real ID, not just an image hash.
+ */
+export function normalizeSentTaps(
+	payload: unknown,
+	browseIdIndex?: Map<string, BrowseCard>,
+): InterestItem[] {
+	const rows = Array.isArray(payload) ? payload : [];
+
+	const mergedMap = new Map<string, InterestItem>();
+
+	for (const entry of rows) {
+		const obj = asObject(entry);
+		if (!obj) continue;
+		if (obj.deleted === true) continue;
+
+		const profileId = toStringId(obj.receiverId);
+		if (!profileId) continue;
+
+		const match = browseIdIndex?.get(profileId);
+		const imageHash = match?.primaryImageUrl ? extractMediaHashFromUrl(match.primaryImageUrl) : null;
+
+		const incoming: InterestItem = {
+			profileId,
+			displayName: match?.displayName ?? null,
+			imageHash,
+			timestamp: toNumber(obj.sentOn),
+			tapType: toNumber(obj.tapType),
+			viewCount: null,
+			canOpenProfile: true,
+			isFromCache: !!match,
+			isRead: obj.readOn != null,
+			onlineUntil: match?.onlineUntil ?? null,
+			rightNow: match?.rightNow ?? null,
+		};
+
+		const existing = mergedMap.get(profileId);
+		if (!existing || (incoming.timestamp ?? 0) > (existing.timestamp ?? 0)) {
+			mergedMap.set(profileId, incoming);
+		}
+	}
+
+	return Array.from(mergedMap.values()).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+}
+
+const PROFILE_LOOKUP_CHUNK_SIZE = 50;
+
+/**
+ * Resolves display name/photo for sent-tap entries the browse-grid cache
+ * couldn't identify, via the same bulk cascade endpoint (POST /v3/profiles)
+ * SettingsBlockedPage/SharedAlbumsPage use to enrich id-only lists. Chunked
+ * to 50 ids per request; a failed chunk just leaves its entries id-only
+ * rather than failing the whole list.
+ */
+export async function enrichSentTapsWithProfiles(
+	items: InterestItem[],
+	getProfilesByIds: (profileIds: (string | number)[]) => Promise<unknown>,
+): Promise<InterestItem[]> {
+	const unresolvedIds = items.filter((item) => !item.displayName).map((item) => item.profileId);
+	if (unresolvedIds.length === 0) return items;
+
+	const chunks: string[][] = [];
+	for (let i = 0; i < unresolvedIds.length; i += PROFILE_LOOKUP_CHUNK_SIZE) {
+		chunks.push(unresolvedIds.slice(i, i + PROFILE_LOOKUP_CHUNK_SIZE));
+	}
+
+	const detailsById = new Map<string, { displayName: string | null; imageHash: string | null }>();
+	await Promise.all(
+		chunks.map(async (chunk) => {
+			try {
+				const raw = await getProfilesByIds(chunk);
+				const profiles = asObject(raw)?.profiles;
+				if (!Array.isArray(profiles)) return;
+				for (const entry of profiles) {
+					const obj = asObject(entry);
+					if (!obj) continue;
+					const profileId = toStringId(obj.profileId);
+					if (!profileId) continue;
+					detailsById.set(profileId, {
+						displayName: getItemDisplayName(obj),
+						imageHash: getItemImageHash(obj),
+					});
+				}
+			} catch {
+				// Chunk failed — its entries stay id-only below.
+			}
+		}),
+	);
+
+	if (detailsById.size === 0) return items;
+
+	return items.map((item) => {
+		const details = detailsById.get(item.profileId);
+		if (!details) return item;
+		return {
+			...item,
+			displayName: details.displayName ?? item.displayName,
+			imageHash: details.imageHash ?? item.imageHash,
+			isFromCache: true,
+		};
+	});
 }
 
 export function formatTimestamp(

@@ -19,32 +19,7 @@ import type { AlbumContentItem } from "../types/chat-page";
 import type { AlbumDetailsResponse } from "../types/chat-service";
 import type { StoredAlbumMedia } from "../types/chat-db";
 import { appLog } from "../utils/logger";
-import { isAutoDownloadMediaEnabled } from "../utils/mediaSettings";
 import { limitChatDbBlobRead } from "../utils/chatDbBlobLimiter";
-
-/**
- * Mirrors newly-downloaded album content into the device's Downloads
- * folder, if the user has opted in. Dynamically imported to avoid a
- * circular dependency — saveMedia.ts imports toDataUri from mediaStore.ts,
- * which this module also depends on.
- */
-async function maybeAutoDownloadToDevice(
-	base64: string,
-	mimeType: string | null,
-	contentType: string | null,
-	conversationId: string | null,
-): Promise<void> {
-	if (!isAutoDownloadMediaEnabled()) {
-		return;
-	}
-	const isVideo = (contentType ?? mimeType ?? "").toLowerCase().startsWith("video/");
-	try {
-		const { saveMediaBytesToDeviceSilent } = await import("./saveMedia");
-		await saveMediaBytesToDeviceSilent(base64, mimeType ?? contentType, isVideo ? "video" : "image", conversationId);
-	} catch (error) {
-		appLog.warn("[album-store] auto-download to device failed", error);
-	}
-}
 
 // Once a background refresh attempt confirms the server doesn't have this
 // album/share anymore (404 once truly gone, 403 once the share is stopped —
@@ -72,6 +47,26 @@ const captureInFlight = new Map<number, Promise<void>>();
 const capturedAlbumIds = new Set<number>();
 const albumCacheListeners = new Set<() => void>();
 const albumCheckInFlight = new Map<number, Promise<void>>();
+// Owner-profile → locally-known album ids, so "does this profile have an
+// album in our local DB" (used to keep the profile carousel's album
+// indicator sticky even after a share is revoked/expired) is a synchronous
+// lookup instead of a DB round trip. Hydrated lazily per profile the same
+// way capturedAlbumIds is hydrated lazily per album (see
+// ensureProfileAlbumCacheChecked below).
+const profileIdToAlbumIds = new Map<string, Set<number>>();
+const profileAlbumCheckInFlight = new Map<string, Promise<void>>();
+
+function addProfileAlbumMapping(profileId: string | null, albumId: number): void {
+	if (!profileId) {
+		return;
+	}
+	let ids = profileIdToAlbumIds.get(profileId);
+	if (!ids) {
+		ids = new Set();
+		profileIdToAlbumIds.set(profileId, ids);
+	}
+	ids.add(albumId);
+}
 // The message bubble's cover image also comes straight from the live body
 // (coverUrl/previewUrl) — once a share is stopped/exhausted/expired the
 // server can drop that field entirely, which would otherwise make the
@@ -179,6 +174,52 @@ export function subscribeToAlbumCache(listener: () => void): () => void {
 	};
 }
 
+/** Synchronous read: has any album ever been captured locally for this owner profile? */
+export function isAlbumCachedForProfile(profileId: string): boolean {
+	const ids = profileIdToAlbumIds.get(profileId);
+	return !!ids && ids.size > 0;
+}
+
+/** Synchronous read of the most recently updated locally-known album id for this profile, or null. */
+export function getCachedAlbumIdForProfile(profileId: string): number | null {
+	const ids = profileIdToAlbumIds.get(profileId);
+	if (!ids || ids.size === 0) {
+		return null;
+	}
+	// getAlbumsForOwnerProfile orders by updated_at DESC, and insertion order
+	// below follows that, so the first id added is the most recently updated one.
+	return ids.values().next().value ?? null;
+}
+
+/**
+ * Checks chatDb for albums previously captured/cached for this owner profile,
+ * once per session — mirrors ensureAlbumCacheChecked's per-album hydration,
+ * just indexed by profile instead of by album id.
+ */
+export function ensureProfileAlbumCacheChecked(profileId: string): void {
+	if (profileIdToAlbumIds.has(profileId) || profileAlbumCheckInFlight.has(profileId)) {
+		return;
+	}
+	const run = (async () => {
+		try {
+			const albums = await chatDb.getAlbumsForOwnerProfile(profileId);
+			if (albums.length > 0) {
+				for (const album of albums) {
+					addProfileAlbumMapping(profileId, Number(album.albumId));
+				}
+				for (const listener of albumCacheListeners) {
+					listener();
+				}
+			}
+		} catch (error) {
+			appLog.warn(`[album-store] failed to check local album cache for profile ${profileId}`, error);
+		} finally {
+			profileAlbumCheckInFlight.delete(profileId);
+		}
+	})();
+	profileAlbumCheckInFlight.set(profileId, run);
+}
+
 /**
  * Clears every local trace of an album — chatDb rows plus every in-memory
  * cache keyed by albumId — used when the user explicitly deletes a received
@@ -193,8 +234,29 @@ export async function deleteLocalAlbum(albumId: number): Promise<void> {
 	capturedAlbumIds.delete(albumId);
 	albumCoverCache.delete(albumId);
 	knownGoneAlbumIds.delete(albumId);
+	for (const ids of profileIdToAlbumIds.values()) {
+		ids.delete(albumId);
+	}
 	for (const listener of albumCacheListeners) {
 		listener();
+	}
+}
+
+/**
+ * Removes a locally-cached album if (and only if) it turns out to be one the
+ * signed-in user owns — a one-time cleanup for rows written before
+ * captureAlbumsForMessages started skipping own-sender albums, so already-
+ * mis-captured own albums stop lingering in a conversation's received-albums
+ * list after the fix ships.
+ */
+async function purgeIfOwnAlbum(albumId: number, userId: number): Promise<void> {
+	try {
+		const stored = await chatDb.getAlbum(String(albumId));
+		if (stored?.ownerProfileId === String(userId)) {
+			await deleteLocalAlbum(albumId);
+		}
+	} catch (error) {
+		appLog.warn(`[album-store] failed to check/purge own album ${albumId}`, error);
 	}
 }
 
@@ -342,10 +404,10 @@ export type CaptureAlbumParams = {
 async function captureAlbumContent(
 	albumId: number,
 	item: AlbumContentItem,
+	position: number,
 	existing: StoredAlbumMedia | undefined,
 	remainingViews: number | null,
 	isViewable: boolean | null,
-	conversationId: string | null,
 ): Promise<void> {
 	const compositeId = `${albumId}:${item.contentId}`;
 	try {
@@ -359,6 +421,7 @@ async function captureAlbumContent(
 				thumbDataBase64: existing.thumbDataBase64,
 				remainingViews,
 				isViewable,
+				position,
 			});
 			return;
 		}
@@ -379,11 +442,8 @@ async function captureAlbumContent(
 			thumbDataBase64: thumb?.base64 ?? main?.base64 ?? null,
 			remainingViews,
 			isViewable,
+			position,
 		});
-
-		if (main?.base64) {
-			void maybeAutoDownloadToDevice(main.base64, main.mimeType, item.contentType, conversationId);
-		}
 	} catch (error) {
 		appLog.warn(`[album-store] failed to capture album content ${compositeId}`, error);
 	}
@@ -409,19 +469,20 @@ export async function captureAlbum(params: CaptureAlbumParams): Promise<void> {
 		conversationId,
 		sharedViaMessageId,
 	});
+	addProfileAlbumMapping(ownerProfileId, albumId);
 
 	const existing = await chatDb.getAlbumMedia(String(albumId));
 	const existingById = new Map(existing.map((m) => [m.contentId, m] as const));
 
 	await Promise.all(
-		content.map((item) =>
+		content.map((item, position) =>
 			captureAlbumContent(
 				albumId,
 				item,
+				position,
 				existingById.get(`${albumId}:${item.contentId}`),
 				remainingViews,
 				isViewable,
-				conversationId,
 			),
 		),
 	);
@@ -551,14 +612,39 @@ async function captureAlbumFromMessageIfNeeded(
  * Scans messages for Album/ExpiringAlbum/ExpiringAlbumV2 shares and eagerly
  * captures each one (fire-and-forget). Safe to call repeatedly for the same
  * messages — reuses already-downloaded bytes instead of re-fetching them.
+ *
+ * Skips albums the signed-in user shared themselves — that's the user's own
+ * pre-existing album (managed permanently via My Albums), not something
+ * "received" that needs a local offline copy, and attributing it to this
+ * conversation would surface it in the chat's own received-albums list as if
+ * it were the other participant's content.
  */
 export function captureAlbumsForMessages(
 	messages: UiMessage[],
 	conversationId: string,
 	getAlbum: (albumId: number) => Promise<AlbumDetailsResponse>,
+	userId: number | null,
 ): void {
 	const entries: { info: AlbumMessageInfo; message: UiMessage }[] = [];
+	// Own-album shares skip the full received-content capture below (see
+	// captureAlbumFromMessageIfNeeded's doc comment), but the chat bubble
+	// still needs *some* blurred teaser cached for them — otherwise nothing
+	// ever writes albumCoverCache for that album id, and the first time the
+	// viewer is opened (openAlbumViewerById → captureAlbum → updateAlbumCacheState)
+	// permanently seeds the cache with the clear content[0] thumbnail instead.
+	const ownEntries: { info: AlbumMessageInfo; message: UiMessage }[] = [];
 	for (const message of messages) {
+		if (userId != null && Number(message.senderId) === Number(userId)) {
+			// Retroactive cleanup for albums a prior version of this function
+			// already captured under the user's own senderId, before this
+			// skip existed — purge them so they stop showing as "received".
+			const info = getAlbumMessageInfo(message);
+			if (info) {
+				void purgeIfOwnAlbum(info.albumId, userId);
+				ownEntries.push({ info, message });
+			}
+			continue;
+		}
 		const info = getAlbumMessageInfo(message);
 		if (info) {
 			entries.push({ info, message });
@@ -570,12 +656,16 @@ export function captureAlbumsForMessages(
 	// same album id shows consistent, already-cached state right away —
 	// independent of (and well ahead of) the slower live-refresh capture
 	// below, which still runs to pick up newly-added content/confirm gone.
-	for (const albumId of new Set(entries.map((e) => e.info.albumId))) {
+	for (const albumId of new Set([...entries, ...ownEntries].map((e) => e.info.albumId))) {
 		ensureAlbumCacheChecked(albumId);
 	}
 
 	for (const { info, message } of entries) {
 		void captureAlbumFromMessageIfNeeded(info, message, conversationId, getAlbum);
+	}
+
+	for (const { info, message } of ownEntries) {
+		void captureAlbumPreviewFromMessage(message, info.albumId);
 	}
 }
 
@@ -600,15 +690,19 @@ export async function cacheAlbumFromSharedPage(params: {
 			conversationId,
 			sharedViaMessageId: null,
 		});
+		addProfileAlbumMapping(String(ownerProfileId), albumId);
 		if (coverUrl && !albumCoverCache.has(albumId)) {
 			const fetched = await fetchAndEncode(coverUrl);
 			if (fetched) {
 				await chatDb.upsertAlbumPreviewCover(String(albumId), fetched.base64, fetched.mimeType);
 				albumCoverCache.set(albumId, toDataUri(fetched.mimeType, fetched.base64));
-				for (const listener of albumCacheListeners) {
-					listener();
-				}
 			}
+		}
+		// Notify regardless of whether the cover fetch above ran — the sticky
+		// "this profile has an album" mapping just changed either way, and the
+		// profile carousel's indicator needs to react to that on its own.
+		for (const listener of albumCacheListeners) {
+			listener();
 		}
 	} catch (error) {
 		appLog.warn(`[album-store] failed to cache album ${albumId} from shared page`, error);

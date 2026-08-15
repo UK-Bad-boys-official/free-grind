@@ -3,6 +3,7 @@ import { Routes, Route, Link, Navigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { AuthProvider } from "./contexts/AuthContext";
 import { PreferencesProvider } from "./contexts/PreferencesContext";
+import { ExploreModeProvider } from "./contexts/ExploreModeContext";
 import { RootLayout } from "./layouts/RootLayout";
 import { ProtectedLayout } from "./layouts/ProtectedLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
@@ -21,6 +22,7 @@ import { GridProfilePage } from "./pages/app/GridProfilePage.tsx";
 import { AboutPage } from "./pages/app/AboutPage.tsx";
 import { SettingsAlbumsPage } from "./pages/app/SettingsAlbumsPage.tsx";
 import { SettingsBlockedPage } from "./pages/app/SettingsBlockedPage.tsx";
+import { SettingsHiddenPage } from "./pages/app/SettingsHiddenPage.tsx";
 import { SettingsBlockHistoryPage } from "./pages/app/SettingsBlockHistoryPage.tsx";
 import { AgeVerificationPage } from "./pages/app/AgeVerificationPage.tsx";
 import { SharedAlbumsPage } from "./pages/app/SharedAlbumsPage.tsx";
@@ -33,18 +35,23 @@ import { IssueSearchPage } from "./pages/app/IssueSearchPage.tsx";
 import { SettingsAutomationPage } from "./pages/app/SettingsAutomationPage.tsx";
 import { SettingsDataPage } from "./pages/app/SettingsDataPage.tsx";
 import { SettingsPrivacyPage } from "./pages/app/SettingsPrivacyPage.tsx";
-import { SettingsSavedPhrasesPage } from "./pages/app/SettingsSavedPhrasesPage.tsx";
+import { SexualHealthPage } from "./pages/app/sexual-health/SexualHealthPage.tsx";
 import { PermissionsOnboarding } from "./components/PermissionsOnboarding";
 import { VersionAnnouncement } from "./components/VersionAnnouncement";
 import { OutdatedVersionGate } from "./components/OutdatedVersionPrompt";
 import { TestReminderGate } from "./components/TestReminderPrompt";
+import { TokenExpiredGate } from "./components/TokenExpiredPrompt";
 import { PushNotificationBridge } from "./components/PushNotificationBridge";
 import { ChatRealtimeBridge } from "./components/ChatRealtimeBridge";
+import { GridAutoRefreshBridge } from "./components/GridAutoRefreshBridge";
+import { VideoCallManager } from "./components/VideoCallManager";
 import { ActiveRouteBridge } from "./components/ActiveRouteBridge";
+import { KeepScreenOnBridge } from "./components/KeepScreenOnBridge";
 import { EntitlementsBridge } from "./components/EntitlementsBridge";
 import { ManagedOptionsCacheBridge } from "./components/ManagedOptionsCacheBridge";
 import { SplashReadyBridge } from "./components/SplashReadyBridge";
 import { SmoothScroll } from "./components/SmoothScroll";
+import { SinModeUnlockOverlay } from "./components/SinModeUnlockOverlay";
 import { usePreferences } from "./contexts/PreferencesContext";
 import ManagerApp from "./ManagerApp";
 import { getRuntimeContext } from "./services/runtimeContext";
@@ -169,6 +176,8 @@ export default function App() {
 		<AuthProvider>
 			<SplashReadyBridge />
 			<PreferencesProvider>
+			<ExploreModeProvider>
+				<SinModeUnlockOverlay />
 				<SmoothScroll>
 					{showOnboarding ? (
 						<div className="app-shell">
@@ -178,11 +187,14 @@ export default function App() {
 						<div className="app-shell">
 							<VersionAnnouncement announcement={PENDING_ANNOUNCEMENT} onClose={handleAnnouncementClose} />
 						</div>
-					) : (<OutdatedVersionGate><TestReminderGate>
+					) : (<TokenExpiredGate><OutdatedVersionGate><TestReminderGate>
 					{renderPhase >= 1 && <ManagerModeRedirect />}
+					{renderPhase >= 1 && <KeepScreenOnBridge />}
 					{renderPhase >= 2 && <PushNotificationBridge />}
 					{renderPhase >= 2 && <ManagedOptionsCacheBridge />}
 					{renderPhase >= 3 && <ChatRealtimeBridge />}
+					{renderPhase >= 3 && <VideoCallManager />}
+					{renderPhase >= 3 && <GridAutoRefreshBridge />}
 					{renderPhase >= 4 && <ActiveRouteBridge />}
 					{renderPhase >= 5 && (
 						<>
@@ -213,10 +225,9 @@ export default function App() {
 								<Route path="/browse/location" element={<BrowseLocationPage />} />
 								<Route path="/right-now" element={<RightNowPage />} />
 								<Route path="/interest" element={<InterestPage />} />
-								<Route path="/chat" element={<ChatPage />} />
 								<Route path="/chat/filters" element={<ChatFiltersPage />} />
 								<Route path="/chat/albums" element={<SharedAlbumsPage />} />
-								<Route path="/chat/:conversationId" element={<ChatPage />} />
+								<Route path="/chat/:conversationId?" element={<ChatPage />} />
 								<Route path="/profile/:profileId" element={<GridProfilePage />} />
 								<Route path="/settings" element={<SettingsPage />} />
 								<Route path="/settings/automation" element={<SettingsAutomationPage />} />
@@ -225,8 +236,9 @@ export default function App() {
 								<Route path="/settings/about" element={<AboutPage />} />
 								<Route path="/settings/albums" element={<SettingsAlbumsPage />} />
 								<Route path="/settings/blocked" element={<SettingsBlockedPage />} />
+								<Route path="/settings/hidden" element={<SettingsHiddenPage />} />
 								<Route path="/settings/block-history" element={<SettingsBlockHistoryPage />} />
-								<Route path="/settings/saved-phrases" element={<SettingsSavedPhrasesPage />} />
+								<Route path="/settings/sexual-health" element={<SexualHealthPage />} />
 								<Route
 									path="/settings/api-inspector"
 									element={
@@ -273,8 +285,9 @@ export default function App() {
 							<Route path="*" element={<ErrorPage />} />
 						</Route>
 					</Routes>
-					</TestReminderGate></OutdatedVersionGate>)}
+					</TestReminderGate></OutdatedVersionGate></TokenExpiredGate>)}
 				</SmoothScroll>
+			</ExploreModeProvider>
 			</PreferencesProvider>
 		</AuthProvider>
 	);

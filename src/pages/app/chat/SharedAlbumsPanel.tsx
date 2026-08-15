@@ -1,4 +1,4 @@
-import { Album, RefreshCw } from "lucide-react";
+import { Album, Images, MessageCircle, RefreshCw, UserRound } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -8,15 +8,16 @@ import { useApiFunctions } from "../../../hooks/useApiFunctions";
 import { ProfileImage } from "../../../components/ui/profile-image";
 import { EmptyState, ErrorState, LoadingState } from "../../../components/ui/states";
 import type { ConversationEntry } from "../../../types/chat";
-import type { AlbumViewer, SharedAlbumItem } from "../../../types/shared-albums";
+import { albumViewerFolderKey, type AlbumViewer, type SharedAlbumItem } from "../../../types/shared-albums";
 import { getThumbImageUrl, validateMediaHash } from "../../../utils/media";
+import { formatDistance, getOnlineStatusMeta } from "../gridpage/utils";
 import { useAvatarCache } from "../../../hooks/useAvatarCache";
 import { resolveAvatarSrc } from "../../../services/avatarStore";
-import { AlbumViewerPanel } from "../shared-albums/AlbumViewerPanel";
-import { PhotoViewer, type PhotoViewerMedia } from "../../../components/PhotoViewer";
+import { PhotoViewer, type PhotoViewerMedia, type PhotoViewerMenuAction } from "../../../components/PhotoViewer";
 import { getAllAlbums, getConversation } from "../../../services/chatDb";
 import { cacheAlbumFromSharedPage, captureAlbum, getCachedAlbumCoverUri, getLocalAlbum } from "../../../services/albumStore";
 import { toDataUri } from "../../../services/mediaStore";
+import { saveAllAlbumMedia } from "../../../utils/albumMedia";
 
 function getCounterparty(
 	entry: ConversationEntry,
@@ -41,7 +42,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 	useAvatarCache();
 	const navigate = useNavigate();
 	const { userId } = useAuth();
-	const { mobileGridColumns } = usePreferences();
+	const { mobileGridColumns, unitsPreset, showAlbumSensitiveContentWarning } = usePreferences();
 	const apiFunctions = useApiFunctions();
 
 	const [isLoading, setIsLoading] = useState(true);
@@ -52,10 +53,9 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 	const [openAlbumError, setOpenAlbumError] = useState<string | null>(null);
 	const [viewer, setViewer] = useState<AlbumViewer | null>(null);
 	const [viewerIndex, setViewerIndex] = useState(0);
-	const [fullScreenIndex, setFullScreenIndex] = useState<number | null>(null);
+	const [isSavingAll, setIsSavingAll] = useState(false);
 
 	const viewerHistoryPushedRef = useRef(false);
-	const fullScreenHistoryPushedRef = useRef(false);
 
 	const minmaxValue = mobileGridColumns === "2" ? "130px" : "100px";
 
@@ -69,7 +69,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				cachedStoredAlbums.map(async (stored): Promise<SharedAlbumItem | null> => {
 					const profileId = stored.ownerProfileId ? Number(stored.ownerProfileId) : null;
 					if (profileId == null) return null;
-					let profileName = `Profile ${profileId}`;
+					let profileName = t("shared_albums.name_fallback");
 					let profileMediaHash: string | null = null;
 					if (stored.conversationId) {
 						const conv = await getConversation(stored.conversationId).catch(() => null);
@@ -89,6 +89,8 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 						profileId,
 						profileName,
 						profileMediaHash,
+						onlineUntil: null,
+						distanceMetres: null,
 						conversationId: stored.conversationId,
 						album: {
 							albumId: Number(stored.albumId),
@@ -121,7 +123,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 					const cp = getCounterparty(entry, userId);
 					if (!cp) continue;
 					profileMap.set(cp.profileId, {
-						profileName: entry.data.name?.trim() || `Profile ${cp.profileId}`,
+						profileName: entry.data.name?.trim() || t("shared_albums.name_fallback"),
 						conversationId: entry.data.conversationId ?? null,
 						profileMediaHash: cp.mediaHash,
 					});
@@ -147,11 +149,13 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				});
 				return {
 					profileId: sa.ownerProfileId,
-					profileName: meta?.profileName || sa.profile.name?.trim() || `Profile ${sa.ownerProfileId}`,
+					profileName: meta?.profileName || sa.profile.name?.trim() || t("shared_albums.name_fallback"),
 					profileMediaHash:
 						meta?.profileMediaHash && validateMediaHash(meta.profileMediaHash)
 							? meta.profileMediaHash
 							: null,
+					onlineUntil: sa.profile.onlineUntil,
+					distanceMetres: sa.profile.distanceKm != null ? sa.profile.distanceKm * 1000 : null,
 					conversationId,
 					album: {
 						albumId: sa.albumId,
@@ -176,7 +180,7 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				cachedOnlyItems.map(async (stored): Promise<SharedAlbumItem | null> => {
 					const profileId = stored.ownerProfileId ? Number(stored.ownerProfileId) : null;
 					if (profileId == null) return null;
-					let profileName = `Profile ${profileId}`;
+					let profileName = t("shared_albums.name_fallback");
 					let profileMediaHash: string | null = null;
 					if (stored.conversationId) {
 						const conv = await getConversation(stored.conversationId).catch(() => null);
@@ -196,6 +200,8 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 						profileId,
 						profileName,
 						profileMediaHash,
+						onlineUntil: null,
+						distanceMetres: null,
 						conversationId: stored.conversationId,
 						album: {
 							albumId: Number(stored.albumId),
@@ -209,7 +215,78 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				}),
 			);
 
-			setItems([...nextItems, ...extraItems.filter((x): x is SharedAlbumItem => x !== null)]);
+			const cachedOnlyValidItems = extraItems.filter((x): x is SharedAlbumItem => x !== null);
+
+			// Batch-fetch full profile details for every distinct album owner in
+			// this load — the shared-albums feed itself never returns a media
+			// hash, and the conversation-derived fallback above only covers
+			// profiles you have a conversation with among the first 6 inbox
+			// pages. Same cascade endpoint the blocked-profiles page uses to get
+			// real display names/avatars for profiles the single-profile
+			// endpoint won't serve.
+			const allOwnerIds = new Set<number>();
+			for (const item of nextItems) allOwnerIds.add(item.profileId);
+			for (const item of cachedOnlyValidItems) allOwnerIds.add(item.profileId);
+
+			if (allOwnerIds.size > 0) {
+				const ids = [...allOwnerIds];
+				const CHUNK_SIZE = 50;
+				const chunks: number[][] = [];
+				for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+					chunks.push(ids.slice(i, i + CHUNK_SIZE));
+				}
+
+				const detailsById = new Map<
+					number,
+					{ displayName: string | null; profileMediaHash: string | null }
+				>();
+				await Promise.all(
+					chunks.map(async (chunk) => {
+						try {
+							const raw = await apiFunctions.getProfilesByIds(chunk);
+							const profiles =
+								raw && typeof raw === "object" && Array.isArray((raw as { profiles?: unknown }).profiles)
+									? (raw as { profiles: unknown[] }).profiles
+									: [];
+							for (const p of profiles) {
+								if (!p || typeof p !== "object") continue;
+								const idRaw = (p as { profileId?: unknown }).profileId;
+								if (idRaw == null) continue;
+								const nameRaw = (p as { displayName?: unknown }).displayName;
+								const hashRaw = (p as { profileImageMediaHash?: unknown }).profileImageMediaHash;
+								detailsById.set(Number(idRaw), {
+									displayName:
+										typeof nameRaw === "string" && nameRaw.trim().length > 0
+											? nameRaw.trim()
+											: null,
+									profileMediaHash:
+										typeof hashRaw === "string" && validateMediaHash(hashRaw) ? hashRaw : null,
+								});
+							}
+						} catch {
+							// Chunk failed — those profiles keep whatever they already had.
+						}
+					}),
+				);
+
+				const nameFallback = t("shared_albums.name_fallback");
+				const applyDetails = (item: SharedAlbumItem): SharedAlbumItem => {
+					const details = detailsById.get(item.profileId);
+					if (!details) return item;
+					return {
+						...item,
+						profileName:
+							item.profileName === nameFallback
+								? details.displayName ?? item.profileName
+								: item.profileName,
+						profileMediaHash: item.profileMediaHash ?? details.profileMediaHash,
+					};
+				};
+				for (let i = 0; i < nextItems.length; i++) nextItems[i] = applyDetails(nextItems[i]);
+				for (let i = 0; i < cachedOnlyValidItems.length; i++) cachedOnlyValidItems[i] = applyDetails(cachedOnlyValidItems[i]);
+			}
+
+			setItems([...nextItems, ...cachedOnlyValidItems]);
 		} catch (e) {
 			setError(e instanceof Error ? e.message : t("shared_albums.error_load_fallback"));
 		} finally {
@@ -243,6 +320,9 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 						albumName: local.albumName ?? item.album.albumName ?? null,
 						profileId: item.profileId,
 						profileName: item.profileName,
+						profileMediaHash: item.profileMediaHash,
+						onlineUntil: item.onlineUntil,
+						distanceMetres: item.distanceMetres,
 						conversationId: item.conversationId,
 						content: local.content,
 					});
@@ -254,6 +334,9 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 						albumName: details.albumName,
 						profileId: item.profileId,
 						profileName: item.profileName,
+						profileMediaHash: item.profileMediaHash,
+						onlineUntil: item.onlineUntil,
+						distanceMetres: item.distanceMetres,
 						conversationId: item.conversationId,
 						content: details.content,
 					});
@@ -307,61 +390,28 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 		}));
 	}, [viewer]);
 
-	const selectedViewerItem =
-		viewer && viewer.content.length > 0
-			? viewer.content[Math.min(viewerIndex, viewer.content.length - 1)]
-			: null;
-
 	const closeViewerState = useCallback(() => {
-		setFullScreenIndex(null);
 		setViewer(null);
 		setViewerIndex(0);
-		fullScreenHistoryPushedRef.current = false;
 		viewerHistoryPushedRef.current = false;
 	}, []);
 
-	const closeFullScreenState = useCallback(() => {
-		setFullScreenIndex(null);
-		fullScreenHistoryPushedRef.current = false;
-	}, []);
-
 	const closeViewer = useCallback(() => {
-		if (fullScreenHistoryPushedRef.current) { window.history.back(); return; }
 		if (viewerHistoryPushedRef.current) { window.history.back(); return; }
 		closeViewerState();
 	}, [closeViewerState]);
 
-	const openFullScreen = useCallback(
-		(index: number) => {
-			if (!viewer || index < 0 || index >= viewer.content.length) return;
-			setViewerIndex(index);
-			setFullScreenIndex(index);
-			if (!fullScreenHistoryPushedRef.current) {
-				window.history.pushState({ sharedAlbumsOverlay: "full-screen" }, "");
-				fullScreenHistoryPushedRef.current = true;
-			}
-		},
-		[viewer],
-	);
-
-	const closeFullScreen = useCallback(() => {
-		if (fullScreenHistoryPushedRef.current) { window.history.back(); return; }
-		closeFullScreenState();
-	}, [closeFullScreenState]);
-
 	const handleIndexChange = useCallback((index: number) => {
-		setFullScreenIndex((prev) => (prev === index ? prev : index));
 		setViewerIndex((prev) => (prev === index ? prev : index));
 	}, []);
 
 	useEffect(() => {
 		const handlePopState = () => {
-			if (fullScreenHistoryPushedRef.current) { closeFullScreenState(); return; }
 			if (viewerHistoryPushedRef.current) { closeViewerState(); }
 		};
 		window.addEventListener("popstate", handlePopState);
 		return () => window.removeEventListener("popstate", handlePopState);
-	}, [closeFullScreenState, closeViewerState]);
+	}, [closeViewerState]);
 
 	useEffect(() => {
 		if (!viewer) return;
@@ -369,13 +419,68 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 			if (e.key === "Escape") {
 				e.preventDefault();
 				e.stopPropagation();
-				if (fullScreenIndex != null) closeFullScreen();
-				else closeViewer();
+				closeViewer();
 			}
 		};
 		window.addEventListener("keydown", onKeyDown, { capture: true });
 		return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-	}, [closeFullScreen, closeViewer, fullScreenIndex, viewer]);
+	}, [closeViewer, viewer]);
+
+	const handleSaveAll = useCallback(async () => {
+		if (!viewer || isSavingAll) return;
+		setIsSavingAll(true);
+		try {
+			await saveAllAlbumMedia(viewer, t);
+		} finally {
+			setIsSavingAll(false);
+		}
+	}, [viewer, isSavingAll, t]);
+
+	const albumMenuActions = useMemo<PhotoViewerMenuAction[]>(() => {
+		if (!viewer) return [];
+		return [
+			{
+				key: "save-all",
+				label: t("profile_details.save_all"),
+				icon: Images,
+				onClick: () => void handleSaveAll(),
+				disabled: isSavingAll || viewer.content.length === 0,
+			},
+			{
+				key: "message",
+				label: t("profile_details.message"),
+				icon: MessageCircle,
+				onClick: () => handleMessageProfile(viewer.profileId),
+			},
+			{
+				key: "view-profile",
+				label: t("chat.view_profile"),
+				icon: UserRound,
+				onClick: () => handleViewProfile(viewer.profileId),
+			},
+		];
+	}, [viewer, isSavingAll, t, handleSaveAll, handleMessageProfile, handleViewProfile]);
+
+	const albumHeader = useMemo(() => {
+		if (!viewer) return undefined;
+		const statusMeta = getOnlineStatusMeta(null, viewer.onlineUntil);
+		const statusLabel = statusMeta.isOnline
+			? t(statusMeta.labelKey, { count: statusMeta.count })
+			: statusMeta.labelKey === "browse_page.status_offline"
+				? t(statusMeta.labelKey)
+				: t(statusMeta.labelKey, { count: statusMeta.count });
+		const distanceLabel = viewer.distanceMetres != null ? formatDistance(viewer.distanceMetres, t, unitsPreset) : null;
+		return {
+			avatarUrl: resolveAvatarSrc(
+				viewer.profileMediaHash,
+				viewer.profileMediaHash ? getThumbImageUrl(viewer.profileMediaHash, "75x75") : null,
+			),
+			name: viewer.profileName,
+			subtitle: [statusLabel, distanceLabel].filter(Boolean).join(" · ") || null,
+			isOnline: statusMeta.isOnline,
+			onClick: () => handleViewProfile(viewer.profileId),
+		};
+	}, [viewer, t, unitsPreset, handleViewProfile]);
 
 	const px = isDesktop ? "px-4" : "px-[var(--app-px)]";
 
@@ -503,27 +608,17 @@ export function SharedAlbumsPanel({ isDesktop }: Props) {
 				</div>
 			) : null}
 
-			{viewer ? (
-				<AlbumViewerPanel
-					viewer={viewer}
-					viewerIndex={viewerIndex}
-					fullScreenIndex={fullScreenIndex}
-					selectedViewerItem={selectedViewerItem}
-					closeViewer={closeViewer}
-					openFullScreen={openFullScreen}
-					onMessageProfile={handleMessageProfile}
-					onViewProfile={handleViewProfile}
-				/>
-			) : null}
-
-			{viewer !== null && fullScreenIndex !== null && (
+			{viewer !== null && (
 				<PhotoViewer
 					isOpen={true}
-					onClose={closeFullScreen}
+					onClose={closeViewer}
 					photos={viewerPhotos}
-					initialIndex={fullScreenIndex}
+					initialIndex={viewerIndex}
 					onIndexChange={handleIndexChange}
-					conversationId={viewer.conversationId}
+					conversationId={albumViewerFolderKey(viewer)}
+					menuActions={albumMenuActions}
+					albumHeader={albumHeader}
+					contentWarning={showAlbumSensitiveContentWarning}
 				/>
 			)}
 		</div>

@@ -6,12 +6,11 @@ import {
 	ArrowUpDown,
 	Clock,
 	Home,
-	Loader2,
 	MessageSquare,
 	Navigation,
 	SlidersHorizontal,
+	Star,
 } from "lucide-react";
-import { useApiFunctions } from "../../hooks/useApiFunctions";
 import { useRightNowFeed } from "../../hooks/queries/useRightNowQueries";
 import type { RightNowFeedItem } from "../../services/apiFunctions";
 import { getThumbImageUrl, validateMediaHash } from "../../utils/media";
@@ -124,7 +123,7 @@ function PostMediaGrid({
 						onClick={() => onOpenPhoto(0)}
 					>
 						<img
-							src={items[0].data?.fullImageUrl ?? items[0].data?.thumbnailUrl ?? ""}
+							src={items[0].data?.thumbnailUrl ?? items[0].data?.fullImageUrl ?? ""}
 							className="h-full w-full object-cover transition-transform active:scale-105"
 							alt=""
 						/>
@@ -139,7 +138,7 @@ function PostMediaGrid({
 							onClick={() => onOpenPhoto(0)}
 						>
 							<img
-								src={items[0].data?.fullImageUrl ?? items[0].data?.thumbnailUrl ?? ""}
+								src={items[0].data?.thumbnailUrl ?? items[0].data?.fullImageUrl ?? ""}
 								className="h-full w-full object-cover transition-transform active:scale-105"
 								alt=""
 							/>
@@ -150,7 +149,7 @@ function PostMediaGrid({
 							onClick={() => onOpenPhoto(1)}
 						>
 							<img
-								src={items[1].data?.fullImageUrl ?? items[1].data?.thumbnailUrl ?? ""}
+								src={items[1].data?.thumbnailUrl ?? items[1].data?.fullImageUrl ?? ""}
 								className="h-full w-full object-cover transition-transform active:scale-105"
 								alt=""
 							/>
@@ -166,7 +165,7 @@ function PostMediaGrid({
 							onClick={() => onOpenPhoto(0)}
 						>
 							<img
-								src={items[0].data?.fullImageUrl ?? items[0].data?.thumbnailUrl ?? ""}
+								src={items[0].data?.thumbnailUrl ?? items[0].data?.fullImageUrl ?? ""}
 								className="h-full w-full object-cover transition-transform active:scale-105"
 								alt=""
 							/>
@@ -178,7 +177,7 @@ function PostMediaGrid({
 								onClick={() => onOpenPhoto(1)}
 							>
 								<img
-									src={items[1].data?.fullImageUrl ?? items[1].data?.thumbnailUrl ?? ""}
+									src={items[1].data?.thumbnailUrl ?? items[1].data?.fullImageUrl ?? ""}
 									className="h-full w-full object-cover transition-transform active:scale-105"
 									alt=""
 								/>
@@ -189,7 +188,7 @@ function PostMediaGrid({
 								onClick={() => onOpenPhoto(2)}
 							>
 								<img
-									src={items[2].data?.fullImageUrl ?? items[2].data?.thumbnailUrl ?? ""}
+									src={items[2].data?.thumbnailUrl ?? items[2].data?.fullImageUrl ?? ""}
 									className="h-full w-full object-cover transition-transform active:scale-105"
 									alt=""
 								/>
@@ -212,7 +211,7 @@ function RightNowRow({
 	item: RightNowFeedItem;
 	onMessage: (profileId: string) => void;
 	onSelect: (profileId: string) => void;
-	onOpenPhoto: (photos: string[], index: number) => void;
+	onOpenPhoto: (photos: string[], index: number, profileId: string) => void;
 	isFirst?: boolean;
 }) {
 	const { t } = useTranslation();
@@ -290,9 +289,16 @@ function RightNowRow({
 					</div>
 
 					<div className="mt-1 flex items-center justify-between gap-2">
-						<p className="truncate text-xs text-[var(--text-muted)] font-medium">
-							{name}
-						</p>
+						<div className="flex min-w-0 items-center gap-1">
+							<p className="truncate text-xs text-[var(--text-muted)] font-medium">
+								{name}
+							</p>
+							{item.isFavorite && (
+								<span title={t("chat.favorite")}>
+									<Star className="h-3 w-3 shrink-0 fill-current text-[var(--accent)]" />
+								</span>
+							)}
+						</div>
 						{item.premiumType && item.premiumType !== "locked" && (
 							<span className="shrink-0 text-[10px] font-medium text-[var(--text-muted)] opacity-50 uppercase tracking-wider">
 								{item.premiumType.split("_")[0]}
@@ -303,7 +309,7 @@ function RightNowRow({
 
 				<PostMediaGrid
 					media={item.media}
-					onOpenPhoto={(index) => onOpenPhoto(photos, index)}
+					onOpenPhoto={(index) => onOpenPhoto(photos, index, item.profileId)}
 				/>
 			</div>
 
@@ -326,7 +332,7 @@ function RightNowRow({
 function RightNowSkeleton() {
 	return (
 		<div className="flex items-center gap-4 border-b border-[var(--surface-2)] py-3 pl-4 pr-4">
-			<div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--surface-2)]" />
+			<div className="h-15 w-15 shrink-0 squircle animate-pulse bg-[var(--surface-2)]" />
 			<div className="flex flex-1 flex-col gap-2">
 				<div className="flex items-center justify-between gap-3">
 					<div className="h-3 w-28 animate-pulse rounded-full bg-[var(--surface-2)]" />
@@ -334,7 +340,7 @@ function RightNowSkeleton() {
 				</div>
 				<div className="h-2.5 w-40 animate-pulse rounded-full bg-[var(--border)]" />
 			</div>
-			<div className="h-10 w-10 shrink-0 animate-pulse rounded-2xl bg-[var(--surface-2)]" />
+			<div className="h-10 w-10 shrink-0 animate-pulse rounded-full bg-[var(--surface-2)]" />
 		</div>
 	);
 }
@@ -343,7 +349,6 @@ export function RightNowPage() {
 	const { t } = useTranslation();
 	const location = useLocation();
 	const navigate = useNavigate();
-	const isDesktop = useDesktopBreakpoint();
 	const persistedFilters = useMemo(() => loadRightNowFiltersDraft(), []);
 
 	const [sort, setSort] = useState<SortOption>(persistedFilters.sort);
@@ -369,10 +374,12 @@ export function RightNowPage() {
 	const [viewerPhotos, setViewerPhotos] = useState<string[]>([]);
 	const [viewerIndex, setViewerIndex] = useState(0);
 	const [isViewerOpen, setIsViewerOpen] = useState(false);
+	const [viewerProfileId, setViewerProfileId] = useState<string | null>(null);
 
-	const openPhotoViewer = useCallback((photos: string[], index: number) => {
+	const openPhotoViewer = useCallback((photos: string[], index: number, profileId: string) => {
 		setViewerPhotos(photos);
 		setViewerIndex(index);
+		setViewerProfileId(profileId);
 		setIsViewerOpen(true);
 	}, []);
 
@@ -542,7 +549,7 @@ export function RightNowPage() {
 					const parsed = JSON.parse(saved);
 					// Safety check: is it our new object format or just an old number?
 					if (parsed && typeof parsed === "object" && "top" in parsed) {
-						const { top, timestamp } = parsed;
+						const { top, timestamp } = parsed as { top: number; timestamp: number };
 						if (Date.now() - timestamp < SCROLL_RESTORATION_TIMEOUT_MS) {
 							feedContainerRef.current.scrollTop = top;
 						} else {
@@ -733,7 +740,7 @@ export function RightNowPage() {
 			</FeedScrollContainer>
 		</PullToRefreshContainer>
 
-		<div className="fixed inset-x-0 bottom-30 z-[60] pointer-events-none md:bottom-36">
+		<div className="fixed inset-x-0 bottom-36 z-[60] pointer-events-none md:bottom-40">
 			<div className="relative mx-auto h-full w-full max-w-4xl px-4 md:px-10">
 				{developerMode && showDebugInfo && (
 					<div
@@ -798,6 +805,7 @@ export function RightNowPage() {
 				onClose={() => setIsViewerOpen(false)}
 				photos={viewerPhotos}
 				initialIndex={viewerIndex}
+				conversationId={viewerProfileId}
 			/>
 		)}
 	</>

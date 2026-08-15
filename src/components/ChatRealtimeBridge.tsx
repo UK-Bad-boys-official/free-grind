@@ -20,10 +20,11 @@
  *   message/tap so it never shows twice.
  */
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { platform } from "@tauri-apps/plugin-os";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { useAuth } from "../contexts/useAuth";
@@ -43,6 +44,7 @@ import {
 	CHAT_ARCHIVE_STATE_EVENT,
 	type ChatArchiveStateChangeDetail,
 } from "../services/conversationArchive";
+import { unhideConversationOnNewMessage } from "../services/conversationHide";
 import { messageSchema, type Message } from "../types/messages";
 import type { RealtimeEnvelope, RealtimeStatus } from "../types/chat-realtime";
 import { appLog } from "../utils/logger";
@@ -50,6 +52,8 @@ import {
 	getMediaCaptureTarget,
 	getOtherParticipant,
 	getMessagePreviewLabel,
+	getMessageImageUrl,
+	getGaymojiUrl,
 } from "../pages/app/chat/chatUtils";
 import { fetchAndStoreMedia } from "../services/mediaStore";
 import { captureAlbumsForMessages } from "../services/albumStore";
@@ -65,7 +69,7 @@ import {
 	isForegroundNotificationsEnabled,
 	isTapNotificationsEnabled,
 } from "../utils/notificationSettings";
-import { notifyLocal } from "../services/localNotify";
+import { notifyLocal, clearChatNotifications } from "../services/localNotify";
 
 let cachedIsAndroid: boolean | null = null;
 function isAndroidRuntime(): boolean {
@@ -82,8 +86,38 @@ function isAndroidRuntime(): boolean {
 	return cachedIsAndroid;
 }
 
+let cachedIsDesktop: boolean | null = null;
+// `@tauri-apps/api/window`'s window-management calls (isFocused,
+// onFocusChanged, ...) reject with "window api not available on mobile" on
+// Android/iOS — there's no windowing concept there. Must gate on this, not
+// just `isTauriRuntime()` (true on mobile too).
+function isDesktopRuntime(): boolean {
+	if (cachedIsDesktop != null) return cachedIsDesktop;
+	if (!isTauriRuntime()) {
+		cachedIsDesktop = false;
+		return false;
+	}
+	try {
+		const p = platform();
+		cachedIsDesktop = p === "windows" || p === "macos" || p === "linux";
+	} catch {
+		cachedIsDesktop = false;
+	}
+	return cachedIsDesktop;
+}
+
+// `document.visibilityState` alone isn't reliable for "is the window
+// actually visible to the user" here — WebView2 doesn't consistently flip it
+// to "hidden" when the native window is merely minimized (as opposed to a
+// browser tab switch). Tauri's own window focus state doesn't have that gap,
+// so it's tracked separately (see the effect below) and combined here.
+let isWindowFocusedCached = true;
+
 function isAppForeground(): boolean {
-	return typeof document === "undefined" || document.visibilityState === "visible";
+	return (
+		(typeof document === "undefined" || document.visibilityState === "visible") &&
+		isWindowFocusedCached
+	);
 }
 
 export const CHAT_REALTIME_EVENT = "fg:chat-realtime-event";
@@ -91,6 +125,8 @@ export const CHAT_REALTIME_STATUS = "fg:chat-realtime-status";
 export const TAP_RECEIVED_EVENT = "fg:tap-received";
 export const VIEW_RECEIVED_EVENT = "fg:view-received";
 export const TYPING_STATUS_EVENT = "fg:typing-status";
+export const VIDEO_CALL_INCOMING_EVENT = "fg:video-call-incoming";
+export const VIDEO_CALL_ENDED_EVENT = "fg:video-call-ended";
 // Re-exported so existing importers (e.g. ChatPage.tsx) don't need to change
 // where they pull this from — conversationArchive.ts is now the source of
 // truth since it also dispatches this event from applySelfBlockAction.
@@ -101,6 +137,48 @@ export type TypingStatusDetail = {
 	profileId: string;
 	status: "Typing" | "Cleared" | "Sent";
 };
+
+export type VideoCallIncomingDetail = {
+	channelId: string;
+	senderId: string;
+};
+
+function parseIncomingCallPayload(payload: unknown): VideoCallIncomingDetail | null {
+	if (!payload || typeof payload !== "object") return null;
+	const r = payload as Record<string, unknown>;
+	const channelId = typeof r.channelId === "string" ? r.channelId : null;
+	const sender = r.senderId;
+	const senderId =
+		typeof sender === "string" ? sender : typeof sender === "number" ? String(sender) : null;
+	if (!channelId || !senderId) return null;
+	return { channelId, senderId };
+}
+
+export type VideoCallEndedDetail = {
+	channelId: string;
+	senderId: string;
+	recipientId: string;
+	result: string;
+	duration: number;
+};
+
+function parseCallEndedPayload(payload: unknown): VideoCallEndedDetail | null {
+	if (!payload || typeof payload !== "object") return null;
+	const r = payload as Record<string, unknown>;
+	const channelId = typeof r.channelId === "string" ? r.channelId : null;
+	if (!channelId) return null;
+	const toId = (v: unknown): string =>
+		typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+	const duration = typeof r.duration === "number" ? r.duration : Number(r.duration) || 0;
+	const result = typeof r.result === "string" ? r.result : "UNKNOWN";
+	return {
+		channelId,
+		senderId: toId(r.senderId),
+		recipientId: toId(r.recipientId),
+		result,
+		duration,
+	};
+}
 
 // Global cache to allow late-mounting components (like ChatPage) to see the
 // current connection status immediately.
@@ -245,17 +323,66 @@ export function ChatRealtimeBridge() {
 		pathRef.current = location.pathname;
 	}, [location.pathname]);
 
+	// Keeps `isWindowFocusedCached` (used by `isAppForeground()`) in sync —
+	// see that function's comment for why `document.visibilityState` alone
+	// can't be trusted for the minimized case on this platform.
+	useEffect(() => {
+		if (!isDesktopRuntime()) return;
+		let unlisten: (() => void) | undefined;
+		let cancelled = false;
+
+		const appWindow = getCurrentWindow();
+		void appWindow.isFocused().then((focused) => {
+			if (!cancelled) isWindowFocusedCached = focused;
+		});
+		void appWindow
+			.onFocusChanged(({ payload }) => {
+				isWindowFocusedCached = payload;
+			})
+			.then((fn) => {
+				if (cancelled) {
+					fn();
+				} else {
+					unlisten = fn;
+				}
+			});
+
+		return () => {
+			cancelled = true;
+			unlisten?.();
+		};
+	}, []);
+
 	const userIdRef = useRef<number | null>(userId);
 	useEffect(() => {
 		userIdRef.current = userId;
 	}, [userId]);
+
+	// tap.v1.tap_sent and tap.v2.tap_sent can both fire for the same real tap
+	// during the server's version rollout — dedupe by sender within a short
+	// window so we don't double-toast/double-notify for one tap.
+	const recentTapSendersRef = useRef<Map<string, number>>(new Map());
+	const shouldProcessIncomingTap = useCallback((profileId: string) => {
+		const now = Date.now();
+		const seen = recentTapSendersRef.current;
+		for (const [key, seenAt] of seen) {
+			if (now - seenAt > 10_000) {
+				seen.delete(key);
+			}
+		}
+		if (seen.has(profileId)) {
+			return false;
+		}
+		seen.set(profileId, now);
+		return true;
+	}, []);
 
 	// A profile still existing (isProfileFound) doesn't mean a conversation
 	// archived by *our own* block should reopen — we chose that, and merely
 	// receiving a stray/in-flight WS event for them (e.g. a read receipt
 	// that was already in transit when the block landed) shouldn't undo it.
 	// Only reconcile activity for profiles we haven't blocked ourselves.
-	const { data: blockedProfileIdsData } = useBlockedProfileIds();
+	const { data: blockedProfileIdsData } = useBlockedProfileIds(userId != null);
 	const blockedProfileIdsRef = useRef<Set<string>>(new Set());
 	useEffect(() => {
 		blockedProfileIdsRef.current = new Set(blockedProfileIdsData ?? []);
@@ -320,7 +447,7 @@ export function ChatRealtimeBridge() {
 				// conversation isn't even in the directory yet.
 				const name =
 					getDisplayName(message.conversationId, userIdRef.current) ??
-					tRef.current("chat.notifications.someone");
+					tRef.current("common.unknown_display_name");
 				if (message.type === "SystemBlocked") {
 					toast(
 						tRef.current("chat.block_toast.blocked_by_other", {
@@ -438,24 +565,39 @@ export function ChatRealtimeBridge() {
 			void reconcileArchivedConversationForProfile(id, isProfileFound);
 		};
 
-		// Foreground-only: fires the OS notification straight from the
-		// WebSocket event so it shows up instantly, before FCM's delayed
-		// push would otherwise be the only source. Android routes through
-		// the native bridge (which dedupes against that later FCM push);
-		// desktop/iOS have no competing push channel, so they go straight
-		// to notifyLocal().
+		// Fires the OS notification straight from the WebSocket event so it
+		// shows up instantly, before FCM's delayed push would otherwise be
+		// the only source. Android routes through the native bridge (which
+		// dedupes against that later FCM push) and only needs to cover the
+		// foreground case there, since FCM already handles background —
+		// hence gating Android on `isAppForeground()` too. Desktop/iOS have
+		// no competing push channel at all, so they must notify regardless
+		// of foreground/background state (e.g. minimized): only the
+		// foreground-notifications toggle (suppressing a redundant popup
+		// while actively looking at the app) applies there, not the
+		// foreground/background state itself.
 		const triggerIncomingMessageNotification = (m: Message) => {
-			if (
-				!isAppForeground() ||
-				!isChatNotificationsEnabled() ||
-				!isForegroundNotificationsEnabled()
-			)
+			if (!isChatNotificationsEnabled()) return;
+
+			if (isAndroidRuntime()) {
+				if (!isAppForeground() || !isForegroundNotificationsEnabled()) return;
+			} else if (isAppForeground() && !isForegroundNotificationsEnabled()) {
 				return;
+			}
 
 			const conv = getConversation(m.conversationId);
 			const other = conv ? getOtherParticipant(conv, userIdRef.current) : null;
-			const senderName = conv?.data.name?.trim() || tRef.current("chat.notifications.someone");
+			const senderName = conv?.data.name?.trim() || tRef.current("common.unknown_display_name");
 			const bodyText = getMessagePreviewLabel(m, tRef.current);
+			// Same as the FCM-side native code: inline preview for picture/gif
+			// content, deliberately excluded for ExpiringImage (view-once) and
+			// Video (no thumbnail available).
+			const previewImageUrl =
+				m.type === "Image" || m.type === "Giphy"
+					? getMessageImageUrl(m)
+					: m.type === "Gaymoji"
+						? getGaymojiUrl(m)
+						: null;
 
 			if (isAndroidRuntime()) {
 				const payload = {
@@ -469,6 +611,7 @@ export function ChatRealtimeBridge() {
 					conversationId: m.conversationId,
 					senderId: String(m.senderId),
 					messageType: m.type,
+					previewImageUrl,
 					rawData: {
 						senderProfileImageMediaHash: other?.primaryMediaHash ?? null,
 					},
@@ -492,7 +635,7 @@ export function ChatRealtimeBridge() {
 			)
 				return;
 
-			const senderName = tap.displayName || tRef.current("chat.notifications.someone");
+			const senderName = tap.displayName || tRef.current("common.unknown_display_name");
 			const bodyText = tap.isMutual
 				? tRef.current("chat.notifications.tapped_you_back")
 				: tRef.current("chat.notifications.tapped_you");
@@ -548,15 +691,18 @@ export function ChatRealtimeBridge() {
 				// Dispatch event AFTER potential DB updates if we want consistency,
 				// or BEFORE if we want speed. Let's do DB updates first for critical stuff.
 
-				// tap.v1.tap_sent — fires on both sender + recipient. We only
-				// surface incoming taps (where we are the recipient).
-				if (envelope.type === "tap.v1.tap_sent") {
+				// tap.v1.tap_sent / tap.v2.tap_sent — fire on both sender + recipient.
+				// We only surface incoming taps (where we are the recipient). v2
+				// carries isMutual in its payload; v1 does not, so isMutual only
+				// resolves reliably once a v2 event (or its own REST response) arrives.
+				if (envelope.type === "tap.v1.tap_sent" || envelope.type === "tap.v2.tap_sent") {
 					const tap = parseTapPayload(envelope.payload);
 					const currentUserId = userIdRef.current;
 					if (
 						tap &&
 						currentUserId != null &&
-						Number(tap.profileId) !== Number(currentUserId)
+						Number(tap.profileId) !== Number(currentUserId) &&
+						shouldProcessIncomingTap(tap.profileId)
 					) {
 						appLog.debug(`[chat-ws:bridge] Incoming tap received from profileId: ${tap.profileId}`);
 						window.dispatchEvent(
@@ -580,6 +726,30 @@ export function ChatRealtimeBridge() {
 							}),
 						);
 						maybeUnarchiveOnActivity(view.profileId);
+					}
+				}
+
+				if (envelope.type === "videocall.v1.incoming_call") {
+					const call = parseIncomingCallPayload(envelope.payload);
+					if (call) {
+						appLog.debug(`[chat-ws:bridge] Incoming video call from profileId: ${call.senderId}`);
+						window.dispatchEvent(
+							new CustomEvent<VideoCallIncomingDetail>(VIDEO_CALL_INCOMING_EVENT, {
+								detail: call,
+							}),
+						);
+					}
+				}
+
+				if (envelope.type === "videocall.v1.call_ended") {
+					const ended = parseCallEndedPayload(envelope.payload);
+					if (ended) {
+						appLog.debug(`[chat-ws:bridge] Video call ended: ${JSON.stringify(ended)}`);
+						window.dispatchEvent(
+							new CustomEvent<VideoCallEndedDetail>(VIDEO_CALL_ENDED_EVENT, {
+								detail: ended,
+							}),
+						);
 					}
 				}
 
@@ -614,6 +784,12 @@ export function ChatRealtimeBridge() {
 								await chatLog.appendMessages(cid, [], ts);
 								maybeUnarchiveOnActivity(senderId);
 							} else {
+								// This is the server echoing back that *we* read this
+								// conversation — possibly from another of our own
+								// devices — so any system notification still showing
+								// for it here is now stale.
+								void clearChatNotifications(cid).catch(() => {});
+
 								const conv = getConversation(cid);
 								if (conv && !isReadReceiptsHidden(cid)) {
 									const other = getOtherParticipant(conv, userIdRef.current);
@@ -708,14 +884,21 @@ export function ChatRealtimeBridge() {
 
 						if (isIncoming) {
 							maybeUnarchiveOnActivity(m.senderId);
+							void unhideConversationOnNewMessage(m.conversationId);
 						}
 
 						// Update local contact index for unread badge persistence
 						if (isIncoming) {
 							const path = pathRef.current;
+							// The route alone isn't enough — it stays on this
+							// chat's path even while the window is minimized,
+							// which would otherwise suppress the unread bump
+							// and notification for a message the user can't
+							// actually see.
 							const isViewingThisChat =
-								path === `/app/chat/${m.conversationId}` ||
-								path.startsWith(`/app/chat/${m.conversationId}/`);
+								isAppForeground() &&
+								(path === `/app/chat/${m.conversationId}` ||
+									path.startsWith(`/app/chat/${m.conversationId}/`));
 							if (!isViewingThisChat) {
 								await incrementUnreadCountForProfile(
 									String(m.senderId),
@@ -741,11 +924,9 @@ export function ChatRealtimeBridge() {
 								conversationId: cid,
 								messageId: msg.messageId,
 								viewOnce: target.viewOnce,
-								isOwnMessage:
-									userIdRef.current != null && Number(msg.senderId) === Number(userIdRef.current),
 							});
 						}
-						captureAlbumsForMessages(msgs, cid, (id) => apiFunctions.getAlbum(id));
+						captureAlbumsForMessages(msgs, cid, (id) => apiFunctions.getAlbum(id), userIdRef.current);
 						captureReplyPreviewsForMessages(msgs, cid);
 					}
 				}
@@ -757,7 +938,7 @@ export function ChatRealtimeBridge() {
 					}),
 				);
 			},
-			onRawMessage: (raw) => {
+			onRawMessage: (_raw) => {
 				// appLog.debug(`[chat-ws:bridge:raw] ${JSON.stringify(raw)}`);
 			},
 			onParseError: (raw, error) => {

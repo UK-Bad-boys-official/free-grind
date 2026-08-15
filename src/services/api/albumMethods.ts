@@ -4,16 +4,20 @@ import {
 	albumPosterSchema,
 	albumSharesResponseSchema,
 	albumsResponseSchema,
+	profileAlbumShareStatusSchema,
 	sharedAlbumViewSchema,
 	sharedAlbumsResponseSchema,
 	type Album,
 	type AlbumDetail,
 	type AlbumLimits,
 	type AlbumPoster,
+	type ProfileAlbumShareStatus,
 	type SharedAlbumView,
 	type SharedAlbum,
 } from "../../types/albums";
 import type {
+	AddOwnAlbumContentByIdsInput,
+	CheckProfileAlbumShareInput,
 	CreateOwnAlbumInput,
 	DeleteOwnAlbumContentInput,
 	DeleteOwnAlbumInput,
@@ -34,7 +38,7 @@ import type {
 import type { RestFetcher } from "../../types/chat-service";
 import { ApiFunctionError, assertSuccess, parseJsonSafe } from "../apiHelpers";
 
-export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => string) {
+export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string, options?: { defaultValue?: string }) => string) {
 	return {
 		async getOwnAlbums(): Promise<Album[]> {
 			const response = await fetchRest("/v1/albums");
@@ -142,6 +146,25 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 			return { ok: true };
 		},
 
+		async addOwnAlbumContentByIds(
+			input: AddOwnAlbumContentByIdsInput,
+		): Promise<{ ok: true }> {
+			const response = await fetchRest(
+				`/v1/albums/${input.albumId}/content/chat/list-by-id?isFresh=true`,
+				{
+					method: "POST",
+					body: { ids: input.ids },
+				},
+			);
+			await assertSuccess(
+				response,
+				t("api.errors.add_album_content_by_ids", {
+					defaultValue: "Failed to add media to album.",
+				}),
+			);
+			return { ok: true };
+		},
+
 		async deleteOwnAlbumContent(
 			input: DeleteOwnAlbumContentInput,
 		): Promise<{ ok: true }> {
@@ -186,6 +209,22 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 			return payload.albums;
 		},
 
+		async checkProfileAlbumShare(
+			input: CheckProfileAlbumShareInput,
+		): Promise<ProfileAlbumShareStatus> {
+			const response = await fetchRest("/v2/albums/shares", {
+				method: "POST",
+				body: { profileId: String(input.profileId) },
+			});
+			await assertSuccess(
+				response,
+				t("api.errors.check_profile_album_share", {
+					defaultValue: "Failed to check album status.",
+				}),
+			);
+			return profileAlbumShareStatusSchema.parse(await parseJsonSafe(response));
+		},
+
 		async openSharedAlbum(
 			input: OpenSharedAlbumInput,
 		): Promise<OpenSharedAlbumResult> {
@@ -206,7 +245,7 @@ export function createAlbumMethods(fetchRest: RestFetcher, t: (key: string) => s
 		// caller cleans up the local cache regardless of which status comes back.
 		async removeAlbumShare(input: RemoveAlbumShareInput): Promise<RemoveAlbumShareResult> {
 			const response = await fetchRest(`/v1/albums/${input.albumId}/shares/remove`, {
-				method: "POST",
+				method: "PUT",
 			});
 			if (
 				response.status !== 403 &&

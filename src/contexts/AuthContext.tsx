@@ -18,10 +18,10 @@ import {
 } from "./auth-context";
 import { appLog } from "../utils/logger";
 import { setActiveChatDbUser, migrateLegacySettingsIfNeeded } from "../services/chatDb";
+import { setActiveInterestStoreUser } from "../services/interestViewsStore";
 import { clearAllCaches } from "../pages/app/gridpage/cache";
 import { loadAutomationCache } from "../utils/autoblock";
 import { loadAutomationRulesCache } from "../utils/automationRules";
-import { loadMediaSettingsCache } from "../utils/mediaSettings";
 import { loadPrivacyCache } from "../utils/privacy";
 import { loadSeenCache } from "../services/seenStore";
 import { runInboxSync } from "../services/inboxSync";
@@ -57,20 +57,23 @@ type AuthAction =
 	| { type: "CLEAR_USER" }
 	| { type: "SET_LOADING"; payload: boolean }
 	| { type: "SET_ERROR"; payload: string | null }
-	| { type: "SET_SETTINGS_READY"; payload: boolean };
+	| { type: "SET_SETTINGS_READY"; payload: boolean }
+	| { type: "SET_TOKEN_EXPIRED"; payload: boolean };
 
 function authReducer(state: AuthState, action: AuthAction): AuthState {
 	switch (action.type) {
 		case "SET_USER":
-			return { ...state, userId: action.payload, error: null };
+			return { ...state, userId: action.payload, error: null, tokenExpired: false };
 		case "CLEAR_USER":
-			return { ...state, userId: null };
+			return { ...state, userId: null, tokenExpired: false };
 		case "SET_LOADING":
 			return { ...state, isLoading: action.payload };
 		case "SET_ERROR":
 			return { ...state, error: action.payload };
 		case "SET_SETTINGS_READY":
 			return { ...state, settingsReady: action.payload };
+		case "SET_TOKEN_EXPIRED":
+			return { ...state, tokenExpired: action.payload };
 		default:
 			return state;
 	}
@@ -82,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		isLoading: true,
 		error: null,
 		settingsReady: false,
+		tokenExpired: false,
 	});
 
 	const { callMethod, asAppError } = useApi();
@@ -277,6 +281,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 
 		dispatch({ type: "SET_SETTINGS_READY", payload: false });
+		setActiveInterestStoreUser(state.userId);
 
 		void (async () => {
 			await setActiveChatDbUser(state.userId);
@@ -304,10 +309,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				const userId = state.userId;
 				void runInboxSync(apiFunctions, userId, () => currentUserIdRef.current === userId);
 				// Fire-and-forget: pulls this account's saved phrases from Grindr and
-				// unions them into the local list. Guarded by the same "still the
-				// active profile" check as the inbox sync above, since chatDb (and so
-				// where the merged list gets written) already points at whichever
-				// profile is active by the time this resolves.
+				// unions them into the local list, but only the very first time this
+				// runs for this profile (see syncSavedPhrasesFromServer) — otherwise a
+				// phrase deleted locally would just get re-added from the server on the
+				// next load. Guarded by the same "still the active profile" check as the
+				// inbox sync above, since chatDb (and so where the merged list gets
+				// written) already points at whichever profile is active by the time
+				// this resolves.
 				void syncSavedPhrasesFromServer(
 					apiFunctions.getSavedPhrases,
 					() => currentUserIdRef.current === userId,
@@ -322,7 +330,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			await Promise.all([
 				loadAutomationCache(),
 				loadAutomationRulesCache(),
-				loadMediaSettingsCache(),
 				loadPrivacyCache(),
 				loadSeenCache(),
 			]);
@@ -340,6 +347,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 		void apiFunctions.registerPresence(state.userId);
 	}, [state.userId, state.isLoading, apiFunctions]);
+
+	// A third-party (JWT) login's token has no real refresh mechanism, so once it
+	// expires any authenticated API call anywhere in the app can be the one that
+	// first surfaces it (see useApi.ts's asAppError). Listen globally rather than
+	// only reacting to calls made from within this context.
+	useEffect(() => {
+		const onTokenExpired = () => {
+			dispatch({ type: "SET_TOKEN_EXPIRED", payload: true });
+		};
+
+		window.addEventListener("fg:token-expired", onTokenExpired);
+		return () => {
+			window.removeEventListener("fg:token-expired", onTokenExpired);
+		};
+	}, []);
 
 	// Receive Android native FCM token and sync it to Grindr once authenticated.
 	useEffect(() => {
@@ -364,15 +386,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			}
 
 			appLog.debug("[PUSH_SYNC] Syncing FCM token to Grindr");
-			void callMethod("sync_push_token", { token }).catch((error) => {
-				const appError = asAppError(error);
-				appLog.warn(
-					"[PUSH_SYNC] Failed to sync push token",
-					appError?.prettyMessage || error,
-				);
-			}).then(() => {
-				appLog.debug("[PUSH_SYNC] Push token sync succeeded");
-			});
+			void callMethod("sync_push_token", { token })
+				.then(() => {
+					window.localStorage.setItem(
+						PUSH_TOKEN_SYNCED_STORAGE_KEY,
+						`${token}::${state.userId}`,
+					);
+					appLog.debug("[PUSH_SYNC] Push token sync succeeded");
+				})
+				.catch((error) => {
+					const appError = asAppError(error);
+					appLog.warn(
+						"[PUSH_SYNC] Failed to sync push token",
+						appError?.prettyMessage || error,
+					);
+				});
 		};
 
 		window.addEventListener("fg:fcm-token", onFcmToken as EventListener);

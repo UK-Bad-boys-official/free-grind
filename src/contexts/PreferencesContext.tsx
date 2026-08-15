@@ -151,14 +151,16 @@ export const ACCENT_PRESETS: AccentPreset[] = [
 const preferencesSchema = z.object({
 	geohash: geohashSchema.nullable().default(null),
 	locationName: z.string().nullable().optional(),
-	colorScheme: z.enum(["system", "light", "dark"]).default("system"),
+	colorScheme: z.enum(["system", "light", "dark"]).default("dark"),
 	accentColor: z.string().default("#ffcc01"),
 	accentContrast: z.string().default("#1a1a1a"),
 	mobileGridColumns: z.enum(["2", "3"]).default("3"),
 	unitsPreset: z.enum(UNIT_PRESETS).default("world"),
 	blurIncomingMedia: z.boolean().default(false),
+	blurGridProfilePictures: z.boolean().default(false),
 	developerMode: z.boolean().default(false),
 	showDebugInfo: z.boolean().default(false),
+	testReminderDisabled: z.boolean().default(false),
 	useAutoLocation: z.boolean().default(false),
 	rightNowTestMode: z.boolean().default(false),
 	activeRightNowId: z.number().nullable().optional(),
@@ -166,6 +168,15 @@ const preferencesSchema = z.object({
 	rightNowRemaining: z.number().default(0),
 	revealEffectEnabled: z.boolean().default(true),
 	revealEffectStrength: z.enum(["subtle", "pronounced"]).default("subtle"),
+	showAlbumSensitiveContentWarning: z.boolean().default(true),
+	openAlbumAsBottomSheet: z.boolean().default(false),
+	sortDrawerMediaByFrequency: z.boolean().default(true),
+	keepScreenOn: z.boolean().default(false),
+	autoFocusLocationSearch: z.boolean().default(true),
+	defaultExpiringPhotos: z.boolean().default(false),
+	defaultAlbumExpirationType: z
+		.enum(["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"])
+		.default("INDEFINITE"),
 });
 
 type Preferences = z.infer<typeof preferencesSchema>;
@@ -187,13 +198,22 @@ type PreferencesAction =
 	| { type: "SET_MOBILE_GRID_COLUMNS"; payload: "2" | "3" }
 	| { type: "SET_UNITS_PRESET"; payload: UnitsPreset }
 	| { type: "SET_BLUR_INCOMING_MEDIA"; payload: boolean }
+	| { type: "SET_BLUR_GRID_PROFILE_PICTURES"; payload: boolean }
 	| { type: "SET_DEVELOPER_MODE"; payload: boolean }
 	| { type: "SET_SHOW_DEBUG_INFO"; payload: boolean }
+	| { type: "SET_TEST_REMINDER_DISABLED"; payload: boolean }
 	| { type: "SET_AUTO_LOCATION"; payload: boolean }
 	| { type: "SET_RIGHT_NOW_TEST_MODE"; payload: boolean }
 	| { type: "SET_RIGHT_NOW_REMAINING"; payload: number }
 	| { type: "SET_REVEAL_EFFECT_ENABLED"; payload: boolean }
 	| { type: "SET_REVEAL_EFFECT_STRENGTH"; payload: RevealStrength }
+	| { type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING"; payload: boolean }
+	| { type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET"; payload: boolean }
+	| { type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY"; payload: boolean }
+	| { type: "SET_KEEP_SCREEN_ON"; payload: boolean }
+	| { type: "SET_AUTO_FOCUS_LOCATION_SEARCH"; payload: boolean }
+	| { type: "SET_DEFAULT_EXPIRING_PHOTOS"; payload: boolean }
+	| { type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE"; payload: Preferences["defaultAlbumExpirationType"] }
 	| { type: "SET_RIGHT_NOW_STATUS"; payload: { id: number | null; expiresAt: number | null } }
 	| { type: "SET_ACCENT"; payload: { color: string; contrast: string } };
 
@@ -216,10 +236,14 @@ function preferencesReducer(
 			return { ...state, unitsPreset: action.payload };
 		case "SET_BLUR_INCOMING_MEDIA":
 			return { ...state, blurIncomingMedia: action.payload };
+		case "SET_BLUR_GRID_PROFILE_PICTURES":
+			return { ...state, blurGridProfilePictures: action.payload };
 		case "SET_DEVELOPER_MODE":
 			return { ...state, developerMode: action.payload };
 		case "SET_SHOW_DEBUG_INFO":
 			return { ...state, showDebugInfo: action.payload };
+		case "SET_TEST_REMINDER_DISABLED":
+			return { ...state, testReminderDisabled: action.payload };
 		case "SET_AUTO_LOCATION":
 			return { ...state, useAutoLocation: action.payload };
 		case "SET_RIGHT_NOW_TEST_MODE":
@@ -230,6 +254,20 @@ function preferencesReducer(
 			return { ...state, revealEffectEnabled: action.payload };
 		case "SET_REVEAL_EFFECT_STRENGTH":
 			return { ...state, revealEffectStrength: action.payload };
+		case "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING":
+			return { ...state, showAlbumSensitiveContentWarning: action.payload };
+		case "SET_OPEN_ALBUM_AS_BOTTOM_SHEET":
+			return { ...state, openAlbumAsBottomSheet: action.payload };
+		case "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY":
+			return { ...state, sortDrawerMediaByFrequency: action.payload };
+		case "SET_KEEP_SCREEN_ON":
+			return { ...state, keepScreenOn: action.payload };
+		case "SET_AUTO_FOCUS_LOCATION_SEARCH":
+			return { ...state, autoFocusLocationSearch: action.payload };
+		case "SET_DEFAULT_EXPIRING_PHOTOS":
+			return { ...state, defaultExpiringPhotos: action.payload };
+		case "SET_DEFAULT_ALBUM_EXPIRATION_TYPE":
+			return { ...state, defaultAlbumExpirationType: action.payload };
 		case "SET_RIGHT_NOW_STATUS":
 			return {
 				...state,
@@ -272,7 +310,7 @@ function applyTheme(colorScheme: ColorScheme, accentColor: string, accentContras
 	root.style.setProperty("--accent-readable", readableAccentColor);
 }
 
-const STORAGE_KEY = "app_preferences";
+export const PREFERENCES_STORAGE_KEY = "app_preferences";
 
 // Per-profile location settings — backed by the active account's chatDb
 // (see chatDb.ts's generic settings key/value store), not this shared
@@ -289,14 +327,16 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 	const [state, dispatch] = useReducer(preferencesReducer, {
 		geohash: null,
 		locationName: null,
-		colorScheme: "system",
+		colorScheme: "dark",
 		accentColor: "#ffcc01",
 		accentContrast: "#1a1a1a",
 		mobileGridColumns: "3",
 		unitsPreset: "world",
 		blurIncomingMedia: false,
+		blurGridProfilePictures: false,
 		developerMode: false,
 		showDebugInfo: false,
+		testReminderDisabled: false,
 		useAutoLocation: false,
 		rightNowTestMode: false,
 		activeRightNowId: null,
@@ -304,6 +344,13 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		rightNowRemaining: 0,
 		revealEffectEnabled: true,
 		revealEffectStrength: "subtle",
+		showAlbumSensitiveContentWarning: true,
+		openAlbumAsBottomSheet: false,
+		sortDrawerMediaByFrequency: true,
+		keepScreenOn: false,
+		autoFocusLocationSearch: true,
+		defaultExpiringPhotos: false,
+		defaultAlbumExpirationType: "INDEFINITE",
 		isLoading: true,
 	});
 
@@ -311,12 +358,12 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 	useEffect(() => {
 		const loadPreferences = async () => {
 			try {
-				const stored = localStorage.getItem(STORAGE_KEY);
+				const stored = localStorage.getItem(PREFERENCES_STORAGE_KEY);
 				const isDesktopDevice = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 				const deviceDefaultStrength = isDesktopDevice ? "pronounced" : "subtle";
 
 				if (stored) {
-					const decoded = JSON.parse(stored);
+					const decoded = JSON.parse(stored) as Record<string, unknown>;
 
 					// If the strength wasn't explicitly saved yet, use the device-based default
 					if (decoded.revealEffectStrength === undefined) {
@@ -331,12 +378,21 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					dispatch({ type: "SET_MOBILE_GRID_COLUMNS", payload: parsed.mobileGridColumns });
 					dispatch({ type: "SET_UNITS_PRESET", payload: parsed.unitsPreset });
 					dispatch({ type: "SET_BLUR_INCOMING_MEDIA", payload: parsed.blurIncomingMedia });
+					dispatch({ type: "SET_BLUR_GRID_PROFILE_PICTURES", payload: parsed.blurGridProfilePictures });
 					dispatch({ type: "SET_DEVELOPER_MODE", payload: parsed.developerMode });
 					dispatch({ type: "SET_SHOW_DEBUG_INFO", payload: parsed.showDebugInfo });
+					dispatch({ type: "SET_TEST_REMINDER_DISABLED", payload: parsed.testReminderDisabled });
 					dispatch({ type: "SET_RIGHT_NOW_TEST_MODE", payload: parsed.rightNowTestMode });
 					dispatch({ type: "SET_RIGHT_NOW_REMAINING", payload: parsed.rightNowRemaining });
 					dispatch({ type: "SET_REVEAL_EFFECT_ENABLED", payload: parsed.revealEffectEnabled });
 					dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: parsed.revealEffectStrength });
+					dispatch({ type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING", payload: parsed.showAlbumSensitiveContentWarning });
+					dispatch({ type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET", payload: parsed.openAlbumAsBottomSheet });
+					dispatch({ type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY", payload: parsed.sortDrawerMediaByFrequency });
+					dispatch({ type: "SET_KEEP_SCREEN_ON", payload: parsed.keepScreenOn });
+					dispatch({ type: "SET_AUTO_FOCUS_LOCATION_SEARCH", payload: parsed.autoFocusLocationSearch });
+					dispatch({ type: "SET_DEFAULT_EXPIRING_PHOTOS", payload: parsed.defaultExpiringPhotos });
+					dispatch({ type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE", payload: parsed.defaultAlbumExpirationType });
 					dispatch({
 						type: "SET_RIGHT_NOW_STATUS",
 						payload: {
@@ -353,7 +409,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					// No stored preferences at all, apply device defaults immediately
 					dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: deviceDefaultStrength });
 					// We also need to apply the theme with these defaults
-					applyTheme("system", "#ffcc01", "#1a1a1a", deviceDefaultStrength);
+					applyTheme("dark", "#ffcc01", "#1a1a1a", deviceDefaultStrength);
 				}
 			} catch (error) {
 				appLog.error("Failed to load preferences:", error);
@@ -410,13 +466,22 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 				mobileGridColumns: currentState.mobileGridColumns,
 				unitsPreset: currentState.unitsPreset,
 				blurIncomingMedia: currentState.blurIncomingMedia,
+				blurGridProfilePictures: currentState.blurGridProfilePictures,
 				developerMode: currentState.developerMode,
 				showDebugInfo: currentState.showDebugInfo,
+				testReminderDisabled: currentState.testReminderDisabled,
 				useAutoLocation: currentState.useAutoLocation,
 				rightNowTestMode: currentState.rightNowTestMode,
 				rightNowRemaining: currentState.rightNowRemaining,
 				revealEffectEnabled: currentState.revealEffectEnabled,
 				revealEffectStrength: currentState.revealEffectStrength,
+				showAlbumSensitiveContentWarning: currentState.showAlbumSensitiveContentWarning,
+				openAlbumAsBottomSheet: currentState.openAlbumAsBottomSheet,
+				sortDrawerMediaByFrequency: currentState.sortDrawerMediaByFrequency,
+				keepScreenOn: currentState.keepScreenOn,
+				autoFocusLocationSearch: currentState.autoFocusLocationSearch,
+				defaultExpiringPhotos: currentState.defaultExpiringPhotos,
+				defaultAlbumExpirationType: currentState.defaultAlbumExpirationType,
 				activeRightNowId: currentState.activeRightNowId ?? null,
 				activeRightNowExpiresAt: currentState.activeRightNowExpiresAt ?? null,
 				...newValues,
@@ -449,11 +514,17 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			if (newValues.blurIncomingMedia !== undefined) {
 				dispatch({ type: "SET_BLUR_INCOMING_MEDIA", payload: newValues.blurIncomingMedia });
 			}
+			if (newValues.blurGridProfilePictures !== undefined) {
+				dispatch({ type: "SET_BLUR_GRID_PROFILE_PICTURES", payload: newValues.blurGridProfilePictures });
+			}
 			if (newValues.developerMode !== undefined) {
 				dispatch({ type: "SET_DEVELOPER_MODE", payload: newValues.developerMode });
 			}
 			if (newValues.showDebugInfo !== undefined) {
 				dispatch({ type: "SET_SHOW_DEBUG_INFO", payload: newValues.showDebugInfo });
+			}
+			if (newValues.testReminderDisabled !== undefined) {
+				dispatch({ type: "SET_TEST_REMINDER_DISABLED", payload: newValues.testReminderDisabled });
 			}
 			if (newValues.useAutoLocation !== undefined) {
 				dispatch({ type: "SET_AUTO_LOCATION", payload: newValues.useAutoLocation });
@@ -469,6 +540,27 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 			}
 			if (newValues.revealEffectStrength !== undefined) {
 				dispatch({ type: "SET_REVEAL_EFFECT_STRENGTH", payload: newValues.revealEffectStrength });
+			}
+			if (newValues.showAlbumSensitiveContentWarning !== undefined) {
+				dispatch({ type: "SET_SHOW_ALBUM_SENSITIVE_CONTENT_WARNING", payload: newValues.showAlbumSensitiveContentWarning });
+			}
+			if (newValues.openAlbumAsBottomSheet !== undefined) {
+				dispatch({ type: "SET_OPEN_ALBUM_AS_BOTTOM_SHEET", payload: newValues.openAlbumAsBottomSheet });
+			}
+			if (newValues.sortDrawerMediaByFrequency !== undefined) {
+				dispatch({ type: "SET_SORT_DRAWER_MEDIA_BY_FREQUENCY", payload: newValues.sortDrawerMediaByFrequency });
+			}
+			if (newValues.keepScreenOn !== undefined) {
+				dispatch({ type: "SET_KEEP_SCREEN_ON", payload: newValues.keepScreenOn });
+			}
+			if (newValues.autoFocusLocationSearch !== undefined) {
+				dispatch({ type: "SET_AUTO_FOCUS_LOCATION_SEARCH", payload: newValues.autoFocusLocationSearch });
+			}
+			if (newValues.defaultExpiringPhotos !== undefined) {
+				dispatch({ type: "SET_DEFAULT_EXPIRING_PHOTOS", payload: newValues.defaultExpiringPhotos });
+			}
+			if (newValues.defaultAlbumExpirationType !== undefined) {
+				dispatch({ type: "SET_DEFAULT_ALBUM_EXPIRATION_TYPE", payload: newValues.defaultAlbumExpirationType });
 			}
 			if (
 				newValues.activeRightNowId !== undefined ||
@@ -522,7 +614,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 
 			// Persist the rest to localStorage (geohash/locationName/useAutoLocation excluded, see above)
 			localStorage.setItem(
-				STORAGE_KEY,
+				PREFERENCES_STORAGE_KEY,
 				JSON.stringify({
 					colorScheme: preferences.colorScheme,
 					accentColor: preferences.accentColor,
@@ -530,12 +622,21 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 					mobileGridColumns: preferences.mobileGridColumns,
 					unitsPreset: preferences.unitsPreset,
 					blurIncomingMedia: preferences.blurIncomingMedia,
+					blurGridProfilePictures: preferences.blurGridProfilePictures,
 					developerMode: preferences.developerMode,
 					showDebugInfo: preferences.showDebugInfo,
+					testReminderDisabled: preferences.testReminderDisabled,
 					rightNowTestMode: preferences.rightNowTestMode,
 					rightNowRemaining: preferences.rightNowRemaining,
 					revealEffectEnabled: preferences.revealEffectEnabled,
 					revealEffectStrength: preferences.revealEffectStrength,
+					showAlbumSensitiveContentWarning: preferences.showAlbumSensitiveContentWarning,
+					openAlbumAsBottomSheet: preferences.openAlbumAsBottomSheet,
+					sortDrawerMediaByFrequency: preferences.sortDrawerMediaByFrequency,
+					keepScreenOn: preferences.keepScreenOn,
+					autoFocusLocationSearch: preferences.autoFocusLocationSearch,
+					defaultExpiringPhotos: preferences.defaultExpiringPhotos,
+					defaultAlbumExpirationType: preferences.defaultAlbumExpirationType,
 					activeRightNowId: preferences.activeRightNowId,
 					activeRightNowExpiresAt: preferences.activeRightNowExpiresAt,
 				}),
@@ -553,8 +654,10 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		mobileGridColumns: state.mobileGridColumns,
 		unitsPreset: state.unitsPreset,
 		blurIncomingMedia: state.blurIncomingMedia,
+		blurGridProfilePictures: state.blurGridProfilePictures,
 		developerMode: state.developerMode,
 		showDebugInfo: state.showDebugInfo,
+		testReminderDisabled: state.testReminderDisabled,
 		useAutoLocation: state.useAutoLocation,
 		rightNowTestMode: state.rightNowTestMode,
 		activeRightNowId: state.activeRightNowId,
@@ -562,6 +665,13 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		rightNowRemaining: state.rightNowRemaining,
 		revealEffectEnabled: state.revealEffectEnabled,
 		revealEffectStrength: state.revealEffectStrength,
+		showAlbumSensitiveContentWarning: state.showAlbumSensitiveContentWarning,
+		openAlbumAsBottomSheet: state.openAlbumAsBottomSheet,
+		sortDrawerMediaByFrequency: state.sortDrawerMediaByFrequency,
+		keepScreenOn: state.keepScreenOn,
+		autoFocusLocationSearch: state.autoFocusLocationSearch,
+		defaultExpiringPhotos: state.defaultExpiringPhotos,
+		defaultAlbumExpirationType: state.defaultAlbumExpirationType,
 		setPreferences,
 		isLoading: state.isLoading || !isLocationLoaded,
 	};

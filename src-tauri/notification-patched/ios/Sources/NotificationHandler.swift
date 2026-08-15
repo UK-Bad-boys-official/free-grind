@@ -76,14 +76,24 @@ public class NotificationHandler: NSObject, NotificationHandlerProtocol {
   }
 
   func toActiveNotification(_ request: UNNotificationRequest) -> ActiveNotification {
-    let notificationRequest = notificationsMap[request.identifier]!
+    // notificationsMap is only populated for notifications scheduled during
+    // this process's lifetime (saveNotification in NotificationPlugin.swift)
+    // — it does not survive an app relaunch. getDeliveredNotifications() can
+    // return entries from a previous session (or before this handler ever
+    // ran), so this must tolerate a miss instead of force-unwrapping.
+    let notificationRequest = notificationsMap[request.identifier]
+    // threadIdentifier is persisted by the system with the notification
+    // itself (set from `group` in makeNotificationContent), so read it
+    // straight from the request rather than the in-memory map above.
+    let threadIdentifier = request.content.threadIdentifier
     return ActiveNotification(
       id: Int(request.identifier) ?? -1,
       title: request.content.title,
       body: request.content.body,
-      sound: notificationRequest.sound ?? "",
+      sound: notificationRequest?.sound ?? "",
       actionTypeId: request.content.categoryIdentifier,
-      attachments: notificationRequest.attachments
+      attachments: notificationRequest?.attachments,
+      group: threadIdentifier.isEmpty ? nil : threadIdentifier
     )
   }
 
@@ -109,6 +119,11 @@ struct ActiveNotification: Encodable {
   let sound: String
   let actionTypeId: String
   let attachments: [NotificationAttachment]?
+  // Mirrors the JS-side ActiveNotification.group (Options.group ->
+  // content.threadIdentifier in makeNotificationContent) — needed so
+  // clearChatNotifications() in localNotify.ts can find notifications for a
+  // given conversation without already knowing their numeric id.
+  let group: String?
 }
 
 struct ReceivedNotification: Encodable {

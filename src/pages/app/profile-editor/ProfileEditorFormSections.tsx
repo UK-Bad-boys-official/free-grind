@@ -6,10 +6,7 @@ import {
 	BadgeInfo,
 	Camera,
 	Clock,
-	Compass,
 	GripVertical,
-	Home,
-	MapPin,
 	Plus,
 	Ruler,
 	ShieldPlus,
@@ -36,10 +33,7 @@ import {
 	useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import {
-	getVisitingModeTranslationKey,
-	type VisitingMode,
-} from "../../../types/visiting";
+import { usePreferences } from "../../../contexts/PreferencesContext";
 import { getThumbImageUrl } from "../../../utils/media";
 import { type UnitsPreset } from "../../../utils/units";
 import { Chip } from "../../../components/ui/chip";
@@ -183,18 +177,15 @@ type ProfileEditorFormSectionsProps = {
 	aboutMeError: string | null;
 	tagsError: string | null;
 	tagList: string[];
+	tagLabelByKey: Map<string, string>;
 	profilePhotoHashes: string[];
 	photoModerationByHash?: Map<string, PhotoModeration>;
 	isSavingPhotos: boolean;
 	isUploadingPhoto: boolean;
 	isDesktop: boolean;
-	onUploadPhoto: (event: React.ChangeEvent<HTMLInputElement>) => void;
+	onOpenPhotoDrawer: () => void;
 	onRemovePhoto: (hash: string) => void;
 	onReorderPhotos: (newHashes: string[]) => void;
-	visitingMode: VisitingMode;
-	isLoadingVisitingMode: boolean;
-	visitingModeError: string | null;
-	onVisitingModeChange: (value: VisitingMode) => void;
 	profileId?: string | number | null;
 	ethnicityOptions: Option[];
 	bodyTypeOptions: Option[];
@@ -221,18 +212,15 @@ export function ProfileEditorFormSections({
 	aboutMeError,
 	tagsError,
 	tagList,
+	tagLabelByKey,
 	profilePhotoHashes,
 	photoModerationByHash,
 	isSavingPhotos,
 	isUploadingPhoto,
 	isDesktop,
-	onUploadPhoto,
+	onOpenPhotoDrawer,
 	onRemovePhoto,
 	onReorderPhotos,
-	visitingMode,
-	isLoadingVisitingMode,
-	visitingModeError,
-	onVisitingModeChange,
 	profileId,
 	ethnicityOptions,
 	bodyTypeOptions,
@@ -250,9 +238,9 @@ export function ProfileEditorFormSections({
 	vaccineOptions,
 }: ProfileEditorFormSectionsProps) {
 	const { t } = useTranslation();
+	const { testReminderDisabled, setPreferences } = usePreferences();
 	const isImperialHeight = unitsPreset === "uk" || unitsPreset === "american";
 	const isImperialWeight = unitsPreset === "american";
-	const visitingModeDisabled = isLoadingVisitingMode || Boolean(visitingModeError);
 	const [activeId, setActiveId] = useState<string | null>(null);
 	const [overId, setOverId] = useState<string | null>(null);
 	const [isTagsDialogOpen, setIsTagsDialogOpen] = useState(false);
@@ -289,15 +277,6 @@ export function ProfileEditorFormSections({
 		onReorderPhotos(arrayMove(profilePhotoHashes, from, to));
 	};
 
-	const visitingModeOptions: Array<{
-		value: VisitingMode;
-		icon: typeof MapPin;
-	}> = [
-		{ value: "AUTO", icon: Compass },
-		{ value: "OFF", icon: Home },
-		{ value: "ON", icon: MapPin },
-	];
-
 	const TEST_REMINDER_THRESHOLD_MONTHS = 3;
 
 	const monthsSinceLastTested = useMemo(() => {
@@ -319,37 +298,29 @@ export function ProfileEditorFormSections({
 					description={t("profile_editor.sections.pictures.description")}
 					icon={Camera}
 					action={
-						<>
-							{(() => {
-								const uploadDisabled = isUploadingPhoto || isSavingPhotos || profilePhotoHashes.length >= MAX_PROFILE_PHOTOS;
-								return (
-									<label
-										htmlFor={uploadDisabled ? undefined : "profile-photo-upload"}
-										className={[
-											"inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm font-medium transition-colors",
-											uploadDisabled
-												? "cursor-not-allowed opacity-40"
-												: "cursor-pointer hover:border-[var(--text-muted)]",
-										].join(" ")}
-									>
-										{isUploadingPhoto
-											? t("profile_editor.sections.pictures.uploading")
-											: t("profile_editor.sections.pictures.add")}
-										<span className="ml-1 rounded bg-[var(--surface)] px-1.5 py-0.5 text-xs font-semibold tabular-nums text-[var(--text-muted)]">
-											{profilePhotoHashes.length}/{MAX_PROFILE_PHOTOS}
-										</span>
-									</label>
-								);
-							})()}
-							<input
-								id="profile-photo-upload"
-								type="file"
-								accept="image/*"
-								onChange={onUploadPhoto}
-								disabled={isUploadingPhoto || isSavingPhotos || profilePhotoHashes.length >= MAX_PROFILE_PHOTOS}
-								className="hidden"
-							/>
-						</>
+						(() => {
+							const uploadDisabled = isUploadingPhoto || isSavingPhotos || profilePhotoHashes.length >= MAX_PROFILE_PHOTOS;
+							return (
+								<button
+									type="button"
+									onClick={onOpenPhotoDrawer}
+									disabled={uploadDisabled}
+									className={[
+										"inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm font-medium transition-colors",
+										uploadDisabled
+											? "cursor-not-allowed opacity-40"
+											: "cursor-pointer hover:border-[var(--text-muted)]",
+									].join(" ")}
+								>
+									{isUploadingPhoto
+										? t("profile_editor.sections.pictures.uploading")
+										: t("profile_editor.sections.pictures.add")}
+									<span className="ml-1 rounded bg-[var(--surface)] px-1.5 py-0.5 text-xs font-semibold tabular-nums text-[var(--text-muted)]">
+										{profilePhotoHashes.length}/{MAX_PROFILE_PHOTOS}
+									</span>
+								</button>
+							);
+						})()
 					}
 				/>
 				<div className="grid gap-4">
@@ -375,16 +346,17 @@ export function ProfileEditorFormSections({
 									/>
 								))}
 								{Array.from({ length: MAX_PROFILE_PHOTOS - profilePhotoHashes.length }).map((_, i) => (
-									<label
+									<button
 										key={`empty-${i}`}
-										htmlFor="profile-photo-upload"
+										type="button"
+										onClick={onOpenPhotoDrawer}
 										className="relative flex aspect-square cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
 									>
 										<Plus className="h-6 w-6" />
 										<span className="text-xs font-medium">
 											{t("profile_editor.sections.pictures.add")}
 										</span>
-									</label>
+									</button>
 								))}
 							</div>
 						</SortableContext>
@@ -473,7 +445,7 @@ export function ProfileEditorFormSections({
 											}
 											className="group inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 text-sm font-medium transition-colors hover:border-[var(--accent)]"
 										>
-											{tag}
+											{tagLabelByKey.get(tag) ?? tag}
 											<X className="h-3 w-3 text-[var(--text-muted)] transition-colors group-hover:text-[var(--text)]" />
 										</button>
 									))}
@@ -702,87 +674,6 @@ export function ProfileEditorFormSections({
 
 			<TravelPlansSection profileId={profileId} />
 
-			{/* Visiting Mode */}
-			<div className="surface-card p-4 sm:p-5">
-				<CategoryHeader
-					title={t("profile_editor.sections.visiting_mode.title")}
-					description={t("profile_editor.sections.visiting_mode.description")}
-					icon={MapPin}
-				/>
-				<div
-					role="radiogroup"
-					aria-label={t("profile_editor.sections.visiting_mode.title")}
-					className="divide-y divide-[var(--border)] overflow-hidden rounded-2xl border border-[var(--border)]"
-				>
-					{visitingModeOptions.map((option) => {
-						const active = option.value === visitingMode;
-						const Icon = option.icon;
-						const modeKey = getVisitingModeTranslationKey(option.value);
-
-						return (
-							<button
-								key={option.value}
-								type="button"
-								role="radio"
-								aria-checked={active}
-								disabled={visitingModeDisabled}
-								onClick={() => onVisitingModeChange(option.value)}
-								className={`flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60 ${
-									active
-										? "bg-[var(--accent)] text-[var(--accent-contrast)]"
-										: "hover:bg-[var(--surface-2)]"
-								}`}
-							>
-								<span
-									className={`shrink-0 rounded-2xl p-2.5 ${
-										active
-											? "bg-[var(--surface)] text-[var(--accent)]"
-											: "bg-[var(--surface-2)] text-[var(--text-muted)]"
-									}`}
-								>
-									<Icon className="h-5 w-5" strokeWidth={2.1} />
-								</span>
-								<span className="min-w-0 flex-1">
-									<span className="block text-sm font-semibold leading-snug">
-										{t(`profile_editor.sections.visiting_mode.options.${modeKey}.label`)}
-									</span>
-									<span
-										className={`mt-0.5 block text-xs leading-relaxed ${
-											active
-												? "text-[var(--accent-contrast)]/75"
-												: "text-[var(--text-muted)]"
-										}`}
-									>
-										{t(`profile_editor.sections.visiting_mode.options.${modeKey}.description`)}
-									</span>
-								</span>
-								<span
-									className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${
-										active
-											? "border-[var(--accent-contrast)] bg-[var(--accent-contrast)]"
-											: "border-[var(--border)]"
-									}`}
-								>
-									{active && (
-										<span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-									)}
-								</span>
-							</button>
-						);
-					})}
-				</div>
-				{isLoadingVisitingMode || visitingModeError ? (
-					<p
-						className={`mt-3 text-xs leading-relaxed ${
-							visitingModeError ? "text-red-300" : "text-[var(--text-muted)]"
-						}`}
-					>
-						{visitingModeError ??
-							t("profile_editor.sections.visiting_mode.loading")}
-					</p>
-				) : null}
-			</div>
-
 			{/* Expectations */}
 			<div className="surface-card p-4 sm:p-5">
 				<CategoryHeader
@@ -942,6 +833,15 @@ export function ProfileEditorFormSections({
 							</p>
 						</div>
 					)}
+
+					<ToggleRow
+						checked={!testReminderDisabled}
+						onChange={(checked) => void setPreferences({ testReminderDisabled: !checked })}
+						label={t("profile_editor.sections.health.test_reminder_toggle")}
+						description={t("profile_editor.sections.health.test_reminder_toggle_desc")}
+						labelClassName="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]"
+						padding=""
+					/>
 
 					<div>
 						<p className="mb-2 block text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">

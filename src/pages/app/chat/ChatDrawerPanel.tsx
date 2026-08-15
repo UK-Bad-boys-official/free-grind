@@ -28,6 +28,9 @@ import { ConfirmDialog } from "../../../components/ui/confirm-dialog";
 import { ToggleRow } from "../../../components/ui/toggle-row";
 import { useModalClose } from "../../../hooks/useModalClose";
 import { BottomSheet, SheetClose } from "../../../components/ui/bottom-sheet";
+import { useLocalMediaCache } from "../../../hooks/useLocalMediaCache";
+import { getCachedMediaUri, getDrawerMediaKey } from "../../../services/mediaStore";
+import { usePreferences } from "../../../contexts/PreferencesContext";
 
 export interface DrawerMedia {
 	id: number;
@@ -36,6 +39,10 @@ export interface DrawerMedia {
 	createdTs: number;
 	used: boolean;
 	takenOnGrindr: boolean;
+	/** Local-only, not from the server — how often this item has been sent
+	 * from the drawer, used to sort most-used media first. See chatDb's
+	 * drawer_media_usage table. */
+	sendCount: number;
 }
 
 interface ChatDrawerPanelProps {
@@ -76,7 +83,7 @@ export function ChatDrawerPanel({
 	onDeleteMedia,
 	isDesktop,
 	albums = [],
-	isLoadingAlbums = false,
+	isLoadingAlbums: _isLoadingAlbums = false,
 	albumCoverMap = new Map(),
 	sharedAlbumIds = new Set(),
 	onShareAlbum,
@@ -86,6 +93,10 @@ export function ChatDrawerPanel({
 	ownProfilePhotoUrl,
 }: ChatDrawerPanelProps) {
 	const { t } = useTranslation();
+	const { defaultExpiringPhotos, defaultAlbumExpirationType } = usePreferences();
+	// Re-renders once a background fetch lands a drawer item in the local
+	// media cache, so it can swap in the cached copy without waiting for a DB read.
+	useLocalMediaCache();
 	const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 	const [pendingAddFile, setPendingAddFile] = useState<File | null>(null);
 	const [pendingTakenOnGrindr, setPendingTakenOnGrindr] = useState(false);
@@ -99,7 +110,7 @@ export function ChatDrawerPanel({
 	const [selectAfterUpload, setSelectAfterUpload] = useState(false);
 	const [selectedAlbumIds, setSelectedAlbumIds] = useState<Set<number>>(new Set());
 	const EXPIRY_OPTIONS = ["INDEFINITE", "ONCE", "TEN_MINUTES", "ONE_HOUR", "ONE_DAY"];
-	const [albumExpirationType, setAlbumExpirationType] = useState("INDEFINITE");
+	const [albumExpirationType, setAlbumExpirationType] = useState<string>(defaultAlbumExpirationType);
 	const EXPIRY_LABELS: Record<string, string> = {
 		INDEFINITE: t("chat_drawer.expiry.unlimited", { defaultValue: "Unlimited" }),
 		ONCE: t("chat_drawer.expiry.once", { defaultValue: "Once" }),
@@ -160,7 +171,12 @@ export function ChatDrawerPanel({
 		escapeKey: !isSending && !isAdding,
 	});
 
-	const [mediaMaxViews, setMediaMaxViews] = useState(2147483647);
+	// The 10-second disappearing timer default only applies to photos — videos
+	// keep their own existing default (maxViews=1, meaning a normal single-play
+	// video rather than the unrelated "NonExpiringVideo" type), unaffected by
+	// this preference.
+	const defaultImageMaxViews = defaultExpiringPhotos ? 1 : 2147483647;
+	const [mediaMaxViews, setMediaMaxViews] = useState(defaultImageMaxViews);
 
 	const toggleSelection = useCallback((id: number, isVideo: boolean) => {
 		setSelectedAlbumIds(new Set());
@@ -168,7 +184,7 @@ export function ChatDrawerPanel({
 			const next = new Set(prev);
 			if (next.has(id)) {
 				next.delete(id);
-				if (next.size === 0) setMediaMaxViews(2147483647);
+				if (next.size === 0) setMediaMaxViews(defaultImageMaxViews);
 			} else {
 				// Enforce image/video exclusivity: clear opposite type
 				const hasOppositeType = [...next].some((existingId) => {
@@ -176,12 +192,12 @@ export function ChatDrawerPanel({
 					return item ? item.contentType.startsWith("video") !== isVideo : false;
 				});
 				if (hasOppositeType) return prev;
-				if (prev.size === 0) setMediaMaxViews(isVideo ? 1 : 2147483647);
+				if (prev.size === 0) setMediaMaxViews(isVideo ? 1 : defaultImageMaxViews);
 				next.add(id);
 			}
 			return next;
 		});
-	}, [media]);
+	}, [media, defaultImageMaxViews]);
 
 	const handleSendSelected = useCallback(async () => {
 		if (selectedIds.size === 0) {
@@ -191,13 +207,13 @@ export function ChatDrawerPanel({
 		try {
 			await onSendMedia(Array.from(selectedIds), mediaMaxViews);
 			setSelectedIds(new Set());
-			setMediaMaxViews(2147483647);
+			setMediaMaxViews(defaultImageMaxViews);
 			onBack();
 		} catch (err) {
 			const message = err instanceof Error ? err.message : t("chat_drawer.error_send_failed");
 			toast.error(message);
 		}
-	}, [selectedIds, onSendMedia, onBack, t, mediaMaxViews]);
+	}, [selectedIds, onSendMedia, onBack, t, mediaMaxViews, defaultImageMaxViews]);
 	const hasSelection = selectedIds.size > 0;
 	const hasAlbumSelection = selectedAlbumIds.size > 0;
 	const hasAnyVideo = hasSelection && [...selectedIds].some(
@@ -323,11 +339,11 @@ export function ChatDrawerPanel({
 							: t("chat_drawer.title", { defaultValue: "Drawer" })}
 					</h3>
 					{pendingAddFile ? (
-						<button type="button" onClick={cancelAddPhoto} className="rounded-full p-1 text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]">
+						<button type="button" onClick={cancelAddPhoto} className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--surface-2)] hover:text-[var(--text)]">
 							<X className="h-4 w-4" />
 						</button>
 					) : (
-						<SheetClose className="rounded-full p-1 text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]">
+						<SheetClose className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--surface-2)] hover:text-[var(--text)]">
 							<X className="h-4 w-4" />
 						</SheetClose>
 					)}
@@ -614,6 +630,7 @@ export function ChatDrawerPanel({
 										const isDisabledByType = hasSelection && (
 											(isItemVideo && hasAnyImage) || (!isItemVideo && hasAnyVideo)
 										);
+										const mediaSrc = getCachedMediaUri(getDrawerMediaKey(item.id)) ?? item.url;
 
 										return (
 											<div
@@ -630,14 +647,14 @@ export function ChatDrawerPanel({
 											>
 												{isImage ? (
 													<img
-														src={item.url}
+														src={mediaSrc}
 														alt={t("chat_drawer.media_alt")}
 														className="h-full w-full object-cover"
 													/>
 												) : (
 													<>
 														<video
-									src={item.url}
+									src={mediaSrc}
 									preload="metadata"
 									muted
 									onLoadedMetadata={(e) => { (e.currentTarget as HTMLVideoElement).currentTime = 0.001; }}

@@ -21,6 +21,7 @@ import {
 	type ShareAlbumPayload,
 } from "../types/chat";
 import { albumsResponseSchema, type Album } from "../types/albums";
+import { createProfileMethods } from "./api/profileMethods";
 import type {
 	AlbumDetailsResponse,
 	CreateAlbumResponse,
@@ -36,11 +37,17 @@ import type {
 } from "../types/chat-service";
 
 import { runAutomationRulesForSender } from "../utils/automationRules";
-import { isReadReceiptsHidden } from "../utils/privacy";
+import { getIncognitoMode, isReadReceiptsHidden } from "../utils/privacy";
 import { ApiFunctionError, assertSuccess, parseJsonSafe } from "./apiHelpers";
 import { sendViaRealtime } from "./chatRealtime";
 
 export { ApiFunctionError as ChatApiError };
+
+// The official app's own fixed page size for GET .../message (it hardcodes
+// this too — not something the server picks on its own). Exported so local
+// (chatDb-backed) pagination — archived conversations, and the "server
+// exhausted" fallthrough for live ones — can match it instead of drifting.
+export const MESSAGE_PAGE_LIMIT = 20;
 
 function sortConversations(entries: ConversationEntry[]): ConversationEntry[] {
 	return [...entries].sort((a, b) => {
@@ -216,6 +223,17 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 							fetchRest(`/v3/me/blocks/${encodeURIComponent(profileId)}`, { method: "POST" }),
 						sendText: (payload: SendTextPayload) => this.sendText(payload),
 						shareAlbum: (payload: ShareAlbumPayload) => this.shareAlbum(payload),
+						tap: (profileId: string | number, tapType: number) =>
+							fetchRest("/v2/taps/add", {
+								method: "POST",
+								body: { recipientId: typeof profileId === "number" ? profileId : Number(profileId), tapType },
+							}),
+						// The inbox-preview snapshot below doesn't carry `tapped` (server
+						// truth for "already tapped, manually or otherwise") — the
+						// "send_tap" action needs a fresh fetch to check that before firing,
+						// to avoid a duplicate tap (the API rejects/ignores those and
+						// repeated attempts risk a ban).
+						getProfileDetail: (profileId: string) => createProfileMethods(fetchRest, t).getProfileDetail(profileId),
 					};
 					const profileSnapshot = {
 						age: profileAge,
@@ -270,6 +288,10 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 			if (params.includeProfile) {
 				query.set("profile", "true");
 			}
+			// Matches the official app's fixed page size for this endpoint — it was
+			// never sent here before, leaving the server's own (unknown, possibly
+			// inconsistent) default in charge of the actual page size.
+			query.set("limit", String(MESSAGE_PAGE_LIMIT));
 
 			const suffix = query.toString() ? `?${query.toString()}` : "";
 			const response = await fetchRest(
@@ -380,7 +402,7 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 
 		async markRead(conversationId: string, messageId: string): Promise<void> {
  		// --- READ RECEIPTS CHECK ---
- 		if (isReadReceiptsHidden(conversationId)) {
+ 		if (isReadReceiptsHidden(conversationId) || getIncognitoMode()) {
  			return; // Silently do nothing. They will never know you read it!
  		}
  		// ---------------------------
@@ -476,27 +498,41 @@ export function createChatService(fetchRest: RestFetcher, t: (key: string) => st
 		},
 
 		async getAlbum(albumId: number | string): Promise<AlbumDetailsResponse> {
-			const response = await fetchRest(`/v1/albums/${albumId}`);
-			await assertSuccess(response, t("chat.errors.load_album_details"));
-			return z
-				.object({
-					albumId: z.coerce.number().int(),
-					albumName: z.string().nullable().optional().default(null),
-					content: z
-						.array(
-							z.object({
-								contentId: z.coerce.number().int(),
-								contentType: z.string().nullable().optional().default(null),
-								thumbUrl: z.string().nullable().optional().default(null),
-								url: z.string().nullable().optional().default(null),
-								coverUrl: z.string().nullable().optional().default(null),
-								processing: z.boolean().optional().default(false),
-							}),
-						)
-						.optional()
-						.default([]),
-				})
-				.parse(await parseJsonSafe(response));
+			const albumDetailsSchema = z.object({
+				albumId: z.coerce.number().int(),
+				albumName: z.string().nullable().optional().default(null),
+				content: z
+					.array(
+						z.object({
+							contentId: z.coerce.number().int(),
+							contentType: z.string().nullable().optional().default(null),
+							thumbUrl: z.string().nullable().optional().default(null),
+							url: z.string().nullable().optional().default(null),
+							coverUrl: z.string().nullable().optional().default(null),
+							processing: z.boolean().optional().default(false),
+						}),
+					)
+					.optional()
+					.default([]),
+			});
+
+			const v2Response = await fetchRest(`/v2/albums/${albumId}`);
+			await assertSuccess(v2Response, t("chat.errors.load_album_details"));
+			const v2Result = albumDetailsSchema.parse(await parseJsonSafe(v2Response));
+
+			// v2 can come back with an empty content array for expired/locked albums
+            // check v1 as a supplement in that case, but keep the (already fetched) v2 result 
+            // as the fallback if v1 doesn't support this route (405) for this account/album.
+			if (v2Result.content.length === 0) {
+				const v1Response = await fetchRest(`/v1/albums/${albumId}`);
+				if (v1Response.status === 405) {
+					return v2Result;
+				}
+				await assertSuccess(v1Response, t("chat.errors.load_album_details"));
+				return albumDetailsSchema.parse(await parseJsonSafe(v1Response));
+			}
+
+			return v2Result;
 		},
 
 		async getSharedAlbums(profileId: number | string): Promise<{

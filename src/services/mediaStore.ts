@@ -14,7 +14,6 @@ import { fetch } from "@tauri-apps/plugin-http";
 import * as chatDb from "./chatDb";
 import type { MediaKind } from "../types/chat-db";
 import { appLog } from "../utils/logger";
-import { isAutoDownloadMediaEnabled } from "../utils/mediaSettings";
 import { limitChatDbBlobRead } from "../utils/chatDbBlobLimiter";
 
 // De-dupe concurrent fetches for the same key (e.g. multiple hydration passes
@@ -114,19 +113,10 @@ export type FetchAndStoreMediaParams = {
 	conversationId: string | null;
 	messageId: string | null;
 	viewOnce: boolean;
-	// Whether the signed-in user sent this message themselves — auto-download
-	// to the device's Downloads folder only ever mirrors media *received*
-	// from someone else, never the user's own outgoing photos/videos.
-	isOwnMessage: boolean;
-	// Set for captures of secondary preview content (reply-quote thumbnails,
-	// reaction bubbles) rather than the actual media a message is about —
-	// never worth mirroring to the device's Downloads folder even when
-	// received. Defaults to false.
-	skipAutoDownload?: boolean;
 };
 
 async function downloadAndStore(params: FetchAndStoreMediaParams): Promise<void> {
-	const { mediaKey, kind, url, conversationId, messageId, viewOnce, isOwnMessage, skipAutoDownload } = params;
+	const { mediaKey, kind, url, conversationId, messageId, viewOnce } = params;
 	const fetched = await fetchAndEncode(url);
 
 	if (!fetched) {
@@ -158,32 +148,6 @@ async function downloadAndStore(params: FetchAndStoreMediaParams): Promise<void>
 		fetchStatus: "ok",
 	});
 	setCachedMediaUri(mediaKey, toDataUri(fetched.mimeType, fetched.base64));
-
-	if (!isOwnMessage && !skipAutoDownload && (kind === "image" || kind === "video")) {
-		void maybeAutoDownloadToDevice(fetched.base64, fetched.mimeType, kind, conversationId);
-	}
-}
-
-/**
- * Mirrors newly-cached media into the device's Downloads folder, if the user
- * has opted in. Dynamically imported to avoid a circular dependency —
- * saveMedia.ts itself imports toDataUri from this module.
- */
-async function maybeAutoDownloadToDevice(
-	base64: string,
-	mimeType: string | null,
-	kind: "image" | "video",
-	conversationId: string | null,
-): Promise<void> {
-	if (!isAutoDownloadMediaEnabled()) {
-		return;
-	}
-	try {
-		const { saveMediaBytesToDeviceSilent } = await import("./saveMedia");
-		await saveMediaBytesToDeviceSilent(base64, mimeType, kind, conversationId);
-	} catch (error) {
-		appLog.warn("[media-store] auto-download to device failed", error);
-	}
 }
 
 /**
@@ -209,6 +173,28 @@ export async function fetchAndStoreMedia(
 			const cached = await limitChatDbBlobRead(() => chatDb.getMediaFile(mediaKey));
 			if (cached?.fetchStatus === "ok") {
 				setCachedMediaUri(mediaKey, toDataUri(cached.mimeType, cached.dataBase64));
+				// Self-heal: a reply-quote/reaction preview capture for this same
+				// content-hash mediaKey (see replyMediaStore.ts) may have left
+				// message_id null, or pointed at a message that's since been
+				// superseded — if this call carries a real messageId that
+				// doesn't match what's stored, re-associate now that we know
+				// which message this content actually belongs to. Cheap since
+				// the bytes are already cached — no refetch needed.
+				if (params.messageId != null && cached.messageId !== params.messageId) {
+					await chatDb
+						.upsertMediaFile({
+							mediaKey,
+							conversationId: params.conversationId,
+							messageId: params.messageId,
+							kind: cached.kind,
+							mimeType: cached.mimeType,
+							dataBase64: cached.dataBase64,
+							viewOnce: cached.viewOnce,
+							sizeBytes: cached.sizeBytes,
+							fetchStatus: cached.fetchStatus,
+						})
+						.catch(() => {});
+				}
 				return;
 			}
 			// Signed URLs that already expired are guaranteed to 403 — skip the
@@ -272,6 +258,16 @@ export async function getLocalMediaUri(
  */
 export function getMessageFallbackMediaKey(messageId: string): string {
 	return `msg:${messageId}`;
+}
+
+/**
+ * Cache key for a user's own drawer media (ChatDrawerPanel) — keyed by the
+ * server's numeric media id, which is stable for the item's lifetime (unlike
+ * its signed CDN url, which expires on a timer and gets re-issued on every
+ * fetch).
+ */
+export function getDrawerMediaKey(mediaId: number): string {
+	return `drawer:${mediaId}`;
 }
 
 /**

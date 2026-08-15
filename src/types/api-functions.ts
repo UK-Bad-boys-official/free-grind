@@ -3,10 +3,11 @@ import type {
 	AlbumDetail,
 	AlbumLimits,
 	AlbumPoster,
+	ProfileAlbumShareStatus,
 	SharedAlbum,
 	SharedAlbumView,
 } from "./albums";
-import type { InterestTapsResponse, InterestViewsResponse } from "./interest";
+import type { InterestSentTapsResponse, InterestTapsResponse, InterestViewsResponse } from "./interest";
 import type { MultipartUpload } from "./chat-service";
 import type {
 	RightNowCreatePostRequest,
@@ -27,10 +28,12 @@ export type ApiFunctionName =
 	| "deleteOwnAlbumContent"
 	| "getSharedAlbums"
 	| "getSharedAlbumsForProfile"
+	| "checkProfileAlbumShare"
 	| "openSharedAlbum"
 	| "removeAlbumShare"
 	| "getViews"
 	| "getTaps"
+	| "getSentTaps"
 	| "tap"
 	| "createRightNowPost";
 
@@ -59,6 +62,11 @@ export interface ReorderOwnAlbumContentInput {
 	contentIds: number[];
 }
 
+export interface AddOwnAlbumContentByIdsInput {
+	albumId: string;
+	ids: number[];
+}
+
 export interface DeleteOwnAlbumContentInput {
 	albumId: string;
 	contentId: string;
@@ -70,6 +78,10 @@ export interface GetAlbumPosterInput {
 }
 
 export interface GetSharedAlbumsForProfileInput {
+	profileId: number;
+}
+
+export interface CheckProfileAlbumShareInput {
 	profileId: number;
 }
 
@@ -116,10 +128,12 @@ export interface ApiFunctionResultMap {
 	deleteOwnAlbumContent: ApiFunctionVoidResult;
 	getSharedAlbums: SharedAlbumView;
 	getSharedAlbumsForProfile: SharedAlbum[];
+	checkProfileAlbumShare: ProfileAlbumShareStatus;
 	openSharedAlbum: OpenSharedAlbumResult;
 	removeAlbumShare: RemoveAlbumShareResult;
 	getViews: InterestViewsResponse;
 	getTaps: InterestTapsResponse;
+	getSentTaps: InterestSentTapsResponse;
 	tap: TapResult;
 	createRightNowPost: RightNowCreatePostResponse;
 }

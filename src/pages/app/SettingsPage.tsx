@@ -2,7 +2,6 @@ import { useNavigate } from "react-router-dom";
 import {
 	AlertCircle,
 	Bell,
-	Bookmark,
 	Bug,
 	CheckCircle2,
 	ChevronLeft,
@@ -10,7 +9,10 @@ import {
 	ClipboardList,
 	DatabaseBackup,
 	Download,
+	EyeOff,
 	GitBranch,
+	HeartPulse,
+	HelpCircle,
 	Images,
 	Info,
 	Loader2,
@@ -19,15 +21,19 @@ import {
 	MessageSquareWarning,
 	History,
 	Palette,
+	Plus,
 	Radar,
 	RefreshCcw,
+	Search,
 	Shield,
 	SlidersHorizontal,
+	Terminal,
     Workflow,
 	UserPlus,
 	UserX,
+	X,
 } from "lucide-react";
-import { useState, useCallback, useEffect, useRef, type CSSProperties } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -41,24 +47,25 @@ import {
 	checkForHotswapUpdate,
 	getCurrentHotswapChannel,
 	getHotswapChannels,
+	getHotswapChannelLabel,
 	installHotswapUpdate,
 	isHotswapAvailable,
 	setHotswapChannel,
-	clearContributorChannel,
 	isContributorChannel,
 	getContributorHandle,
 	type HotswapChannel,
 } from "../../services/hotswap";
 import { Button } from "../../components/ui/button";
 import { ConfirmDialog } from "../../components/ui/confirm-dialog";
-import { FingerprintCheckButton } from "../../components/FingerprintCheckButton";
+import { useFingerprintCheck } from "../../components/FingerprintCheckButton";
 import { VersionAnnouncement } from "../../components/VersionAnnouncement";
 import { VERSION_ANNOUNCEMENTS } from "../../data/versionAnnouncements";
 import { OutdatedVersionPromptView } from "../../components/OutdatedVersionPrompt";
 import { Avatar } from "../../components/ui/avatar";
 import { getThumbImageUrl } from "../../utils/media";
 import { getSavedAccountProfile, removeSavedAccountProfile } from "../../services/savedAccountProfiles";
-import { getAutomationSettings } from "../../utils/autoblock";
+import { isAndroid } from "../../services/saveMedia";
+import { useSettingsSearchIndex } from "../../data/settingsSearchIndex";
 
 const PUSH_TOKEN_STORAGE_KEY = "fg-fcm-token";
 const PUSH_TOKEN_SYNCED_STORAGE_KEY = "fg-fcm-token-synced";
@@ -183,11 +190,127 @@ function describeInboxSyncStatus(status: InboxSyncStatus, t: TFunction) {
 	}
 }
 
+function ContributorChannelDialog({
+	isOpen,
+	value,
+	onValueChange,
+	onSubmit,
+	onCancel,
+	isProcessing,
+}: {
+	isOpen: boolean;
+	value: string;
+	onValueChange: (value: string) => void;
+	onSubmit: () => void;
+	onCancel: () => void;
+	isProcessing: boolean;
+}) {
+	const dialogRef = useRef<HTMLDialogElement | null>(null);
+	const inputRef = useRef<HTMLInputElement | null>(null);
+
+	useEffect(() => {
+		const dialog = dialogRef.current;
+		if (!dialog) return;
+		if (isOpen) {
+			if (!dialog.open) {
+				try {
+					dialog.showModal();
+				} catch {
+					dialog.show();
+				}
+				requestAnimationFrame(() => inputRef.current?.focus());
+			}
+		} else if (dialog.open) {
+			dialog.close();
+		}
+	}, [isOpen]);
+
+	useEffect(() => {
+		return () => {
+			const dialog = dialogRef.current;
+			if (dialog?.open) {
+				dialog.close();
+			}
+		};
+	}, []);
+
+	useEffect(() => {
+		const dialog = dialogRef.current;
+		if (!dialog) return;
+		const handleCancel = (event: Event) => {
+			event.preventDefault();
+			if (!isProcessing) onCancel();
+		};
+		dialog.addEventListener("cancel", handleCancel);
+		return () => dialog.removeEventListener("cancel", handleCancel);
+	}, [isProcessing, onCancel]);
+
+	return (
+		<dialog
+			ref={dialogRef}
+			className="fixed inset-0 m-auto h-fit w-[calc(100%-2rem)] max-w-sm rounded-2xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_92%,black_8%)] p-0 text-[var(--text)] shadow-2xl backdrop:bg-black/45"
+			onClick={(event) => {
+				if (event.target === dialogRef.current && !isProcessing) onCancel();
+			}}
+		>
+			<div className="p-4">
+				<p className="text-sm font-semibold text-[var(--text)]">Contributor Channel</p>
+				<p className="mt-2 text-sm leading-relaxed text-[var(--text-muted)]">
+					Receive experimental builds from a community contributor's channel. Use at your own risk.
+				</p>
+				<input
+					ref={inputRef}
+					type="text"
+					value={value}
+					onChange={(event) => onValueChange(event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
+					onKeyDown={(event) => {
+						if (event.key === "Enter") onSubmit();
+					}}
+					placeholder="contributor-handle"
+					maxLength={32}
+					disabled={isProcessing}
+					className="input-field mt-4 w-full font-mono text-sm disabled:opacity-60"
+				/>
+				<div className="mt-6 flex gap-2">
+					<button
+						type="button"
+						onClick={onCancel}
+						disabled={isProcessing}
+						className="inline-flex h-11 flex-1 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-muted)] transition hover:border-[var(--accent)] hover:text-[var(--text)] disabled:opacity-60"
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						onClick={onSubmit}
+						disabled={isProcessing || !value}
+						className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-contrast)] transition hover:brightness-110 disabled:opacity-60"
+					>
+						{isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+						<span>Activate</span>
+					</button>
+				</div>
+			</div>
+		</dialog>
+	);
+}
+
 export function SettingsPage() {
 	const { t } = useTranslation();
 	const { userId, logout, savedAccounts, switchAccount, removeSavedAccount } = useAuth();
 	const inboxSyncStatus = useInboxSyncStatus(userId);
 	const inboxSyncDisplay = describeInboxSyncStatus(inboxSyncStatus, t);
+	const [searchQuery, setSearchQuery] = useState("");
+	const settingsSearchIndex = useSettingsSearchIndex();
+	const searchResults = useMemo(() => {
+		const query = searchQuery.trim().toLowerCase();
+		if (!query) return [];
+		return settingsSearchIndex.filter((entry) =>
+			entry.label.toLowerCase().includes(query) ||
+			entry.description?.toLowerCase().includes(query) ||
+			entry.section.toLowerCase().includes(query),
+		);
+	}, [searchQuery, settingsSearchIndex]);
 	const [switchingProfileId, setSwitchingProfileId] = useState<string | null>(null);
 	const [removingProfileId, setRemovingProfileId] = useState<string | null>(null);
 	const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -202,6 +325,7 @@ export function SettingsPage() {
 	const [previewOutdatedPrompt, setPreviewOutdatedPrompt] = useState(false);
 	const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
 	const [isSwitchingChannel, setIsSwitchingChannel] = useState(false);
+	const fingerprintCheck = useFingerprintCheck();
 	const [isSyncingFcm, setIsSyncingFcm] = useState(false);
 	const [fcmToken, setFcmToken] = useState<string | null>(() => {
 		const stored = window.localStorage.getItem(PUSH_TOKEN_STORAGE_KEY);
@@ -212,9 +336,6 @@ export function SettingsPage() {
 	const [fcmSyncedToken, setFcmSyncedToken] = useState<string | null>(() => window.localStorage.getItem(PUSH_TOKEN_SYNCED_STORAGE_KEY));
 	const [fcmEventLog, setFcmEventLog] = useState<{ time: string; token: string }[]>([]);
 	const [manualToken, setManualToken] = useState("");
-    const [forbiddenWords, setForbiddenWords] = useState(() => getAutomationSettings().forbiddenWords);
-    const [blockOnGrid, setBlockOnGrid] = useState(() => getAutomationSettings().blockGrid);
-	const [blockOnChat, setBlockOnChat] = useState(() => getAutomationSettings().blockOnChat);
 	const fcmLogRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
@@ -234,19 +355,10 @@ export function SettingsPage() {
 	}, []);
 	const [updateChannel, setUpdateChannel] =
 		useState<HotswapChannel>(getCurrentHotswapChannel());
-	const visibleChannels = getHotswapChannels({ includeDevChannels: developerMode });
+	const visibleChannels = getHotswapChannels();
 	const [contributorCodeInput, setContributorCodeInput] = useState("");
 	const [isActivatingContributor, setIsActivatingContributor] = useState(false);
-
-	useEffect(() => {
-		if (!developerMode && updateChannel === "testingwjay") {
-			void setHotswapChannel("main").then(() => {
-				setUpdateChannel("main");
-				toast("Developer-only update channel disabled; switched to main.");
-			});
-		}
-		// Contributor channels are always allowed regardless of developer mode
-	}, [developerMode, updateChannel]);
+	const [isContributorDialogOpen, setIsContributorDialogOpen] = useState(false);
 
 	const handleForceSyncFcm = useCallback(async (overrideToken?: string) => {
 		const tokenToSync = overrideToken ?? fcmToken;
@@ -257,8 +369,11 @@ export function SettingsPage() {
 		setIsSyncingFcm(true);
 		try {
 			await callMethod("sync_push_token", { token: tokenToSync });
-			window.localStorage.setItem(PUSH_TOKEN_SYNCED_STORAGE_KEY, tokenToSync);
-			setFcmSyncedToken(tokenToSync);
+			// Marker must match AuthContext's `${token}::${userId}` format — the same
+			// FCM token is shared across saved accounts, but sync is per-account.
+			const syncMarker = `${tokenToSync}::${userId}`;
+			window.localStorage.setItem(PUSH_TOKEN_SYNCED_STORAGE_KEY, syncMarker);
+			setFcmSyncedToken(syncMarker);
 			toast.success("FCM token synced to Grindr.");
 		} catch (error) {
 			const appError = asAppError(error);
@@ -266,13 +381,20 @@ export function SettingsPage() {
 		} finally {
 			setIsSyncingFcm(false);
 		}
-	}, [fcmToken, callMethod, asAppError]);
+	}, [fcmToken, userId, callMethod, asAppError]);
 
 	const handleLogout = async () => {
 		setIsLoggingOut(true);
+		const loggedOutProfileId = userId != null ? String(userId) : null;
 		try {
 			await logout();
-			navigate("/auth/sign-in");
+			const nextAccount = savedAccounts.find((account) => account.profileId !== loggedOutProfileId);
+			if (nextAccount) {
+				await switchAccount(nextAccount.profileId);
+				navigate("/");
+			} else {
+				navigate("/auth/sign-in");
+			}
 		} catch (error) {
 			const message = getErrorMessage(error, "Failed to log out.");
 			toast.error(message);
@@ -346,11 +468,6 @@ export function SettingsPage() {
 	};
 
 	const handleSwitchUpdateChannel = async (channel: HotswapChannel) => {
-		if (!developerMode && channel === "testingwjay") {
-			toast.error("Enable Developer Mode to use this update branch.");
-			return;
-		}
-
 		if (!isHotswapAvailable()) {
 			toast.error(t("settings.ota_available_only_tauri"));
 			return;
@@ -368,12 +485,12 @@ export function SettingsPage() {
 			const result = await checkForHotswapUpdate();
 			if (!result.requiresBinaryUpdate && result.available) {
 				await installHotswapUpdate();
-				toast.success(t("settings.switched_and_updated", { channel }));
+				toast.success(t("settings.switched_and_updated", { channel: getHotswapChannelLabel(channel) }));
 				window.location.reload();
 				return;
 			}
 
-			toast.success(t("settings.switched_channel", { channel }));
+			toast.success(t("settings.switched_channel", { channel: getHotswapChannelLabel(channel) }));
 			window.location.reload();
 		} catch (error) {
 			if (import.meta.env.DEV) {
@@ -427,28 +544,6 @@ export function SettingsPage() {
 		}
 	};
 
-	const handleLeaveContributorChannel = async () => {
-		if (!isHotswapAvailable()) {
-			toast.error(t("settings.ota_available_only_tauri"));
-			return;
-		}
-
-		setIsSwitchingChannel(true);
-		try {
-			await clearContributorChannel();
-			setUpdateChannel("main");
-			toast.success("Left contributor channel, switched back to main.");
-			window.location.reload();
-		} catch (error) {
-			if (import.meta.env.DEV) {
-				appLog.error("Leave contributor channel failed:", error);
-			}
-			toast.error("Failed to leave contributor channel.");
-		} finally {
-			setIsSwitchingChannel(false);
-		}
-	};
-
 	const navRow = (
 		onClick: (() => void) | null,
 		icon: React.ReactNode,
@@ -480,12 +575,36 @@ export function SettingsPage() {
 		);
 	};
 
+	if (previewAnnouncement && LATEST_ANNOUNCEMENT) {
+		return (
+			<div className="app-shell z-[300]">
+				<VersionAnnouncement
+					announcement={LATEST_ANNOUNCEMENT}
+					buttonLabel="Close"
+					onClose={() => setPreviewAnnouncement(false)}
+				/>
+			</div>
+		);
+	}
+
+	if (previewOutdatedPrompt) {
+		return (
+			<div className="app-shell z-[110]">
+				<OutdatedVersionPromptView
+					appVersion={import.meta.env.VITE_APP_VERSION}
+					releaseInfo={PREVIEW_RELEASE_INFO}
+					onDismiss={() => setPreviewOutdatedPrompt(false)}
+				/>
+			</div>
+		);
+	}
+
 	return (
 		<section className="app-screen">
 			<header className="mb-7">
 				<button
 					type="button"
-					onClick={() => navigate("/")}
+					onClick={() => navigate("/", { replace: true })}
 					className="mb-4 inline-flex items-center gap-1.5 text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text)]"
 					aria-label={t("settings.back_to_browse")}
 				>
@@ -503,6 +622,58 @@ export function SettingsPage() {
 				<p className="app-subtitle mt-1">{t("settings.subtitle")}</p>
 			</header>
 
+			<div className="settings-search-bar mb-6 flex items-center gap-2.5 px-4 py-0.5">
+				<Search className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+				<input
+					type="search"
+					value={searchQuery}
+					onChange={(e) => setSearchQuery(e.target.value)}
+					placeholder={t("settings.search_placeholder")}
+					className="h-11 flex-1 bg-transparent text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
+				/>
+				{searchQuery ? (
+					<button
+						type="button"
+						onClick={() => setSearchQuery("")}
+						className="shrink-0 rounded-full p-1 text-[var(--text-muted)] transition hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
+						aria-label={t("common.clear", { defaultValue: "Clear" })}
+					>
+						<X className="h-4 w-4" />
+					</button>
+				) : null}
+			</div>
+
+			{searchQuery.trim() ? (
+				<div className="grid gap-6">
+					{searchResults.length === 0 ? (
+						<p className="px-1 text-sm text-[var(--text-muted)]">
+							{t("settings.search_no_results", { query: searchQuery.trim() })}
+						</p>
+					) : (
+						<div className="surface-card overflow-hidden divide-y divide-[var(--border)]">
+							{searchResults.map((entry) => (
+								<button
+									key={entry.id}
+									type="button"
+									onClick={() => navigate(entry.anchor ? `${entry.route}#${entry.anchor}` : entry.route)}
+									className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-[var(--surface-2)] active:bg-[var(--surface-2)]"
+								>
+									<div className={`rounded-2xl p-2.5 shrink-0 ${entry.iconClass}`}>
+										<entry.icon className="h-5 w-5" />
+									</div>
+									<div className="min-w-0 flex-1">
+										<p className="text-sm font-semibold leading-snug">{entry.label}</p>
+										<p className="text-xs text-[var(--text-muted)] leading-snug mt-0.5 truncate">
+											{entry.section}{entry.description ? ` — ${entry.description}` : ""}
+										</p>
+									</div>
+									<ChevronRight className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-50" />
+								</button>
+							))}
+						</div>
+					)}
+				</div>
+			) : (
 			<div className="grid gap-6">
 
 				{/* Profile — the active profile is the primary focus (tap it to edit
@@ -511,7 +682,7 @@ export function SettingsPage() {
 				    re-entering a password. Each saved account keeps its own chat
 				    history and caches fully separate (see chatDb.ts/cache.ts), so
 				    switching never shows a leftover account's data. */}
-				<div>
+				<div className="min-w-0">
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Profile</p>
 					<div className="surface-card overflow-hidden divide-y divide-[var(--border)]">
 						{(() => {
@@ -620,34 +791,6 @@ export function SettingsPage() {
 					</div>
 				</div>
 
-				{/* Customizability */}
-				<div>
-					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Customizability</p>
-					<div className="surface-card overflow-hidden divide-y divide-[var(--border)]">
-						{navRow(
-							() => navigate("/settings/customizability"),
-							<Palette className="h-5 w-5" />,
-							"bg-violet-500/15 text-violet-400",
-							t("settings.customizability"),
-							t("settings.customizability_desc"),
-						)}
-						{navRow(
-							() => navigate("/settings/behavior"),
-							<SlidersHorizontal className="h-5 w-5" />,
-							"bg-slate-500/15 text-slate-400",
-							t("settings.behavior"),
-							t("settings.behavior_desc"),
-						)}
-						{navRow(
-							() => navigate("/settings/notifications"),
-							<Bell className="h-5 w-5" />,
-							"bg-blue-500/15 text-blue-400",
-							t("settings.notifications"),
-							t("settings.notifications_desc"),
-						)}
-					</div>
-				</div>
-
 				{/* Chat */}
 				<div>
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Chat</p>
@@ -695,20 +838,6 @@ export function SettingsPage() {
 							</div>
 						</div>
 						{navRow(
-							() => navigate("/settings/automation"),
-							<Workflow className="h-5 w-5" />,
-							"bg-amber-500/15 text-amber-400",
-							t("settings.automation"),
-							t("settings.automation_desc"),
-						)}
-						{navRow(
-							() => navigate("/settings/saved-phrases"),
-							<Bookmark className="h-5 w-5" />,
-							"bg-emerald-500/15 text-emerald-400",
-							t("settings.saved_phrases", { defaultValue: "Saved Phrases" }),
-							t("settings.saved_phrases_desc", { defaultValue: "Manage chat quick replies and import/export .txt" }),
-						)}
-						{navRow(
 							() => navigate("/settings/albums"),
 							<Images className="h-5 w-5" />,
 							"bg-pink-500/15 text-pink-400",
@@ -730,6 +859,15 @@ export function SettingsPage() {
 							t("settings.blocked_accounts_desc"),
 						)}
 						{navRow(
+							() => navigate("/settings/hidden"),
+							<EyeOff className="h-5 w-5" />,
+							"bg-slate-500/15 text-slate-400",
+							t("settings.hidden_profiles", { defaultValue: "Hidden Profiles" }),
+							t("settings.hidden_profiles_desc", {
+								defaultValue: "See who you hid from the grid and unhide them anytime.",
+							}),
+						)}
+						{navRow(
 							() => navigate("/settings/block-history"),
 							<History className="h-5 w-5" />,
 							"bg-orange-500/15 text-orange-400",
@@ -745,20 +883,64 @@ export function SettingsPage() {
 							t("settings.privacy"),
 							t("settings.privacy_desc"),
 						)}
+						{navRow(
+							() => navigate("/settings/sexual-health"),
+							<HeartPulse className="h-5 w-5" />,
+							"bg-rose-500/15 text-rose-400",
+							t("settings.sexual_health", { defaultValue: "Sexual Health" }),
+							t("settings.sexual_health_desc", {
+								defaultValue: "Track PrEP doses, encounters, tests and appointments.",
+							}),
+						)}
 					</div>
 				</div>
 
-				{/* Data */}
+				{/* Customizability */}
+				<div>
+					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Customizability</p>
+					<div className="surface-card overflow-hidden divide-y divide-[var(--border)]">
+						{navRow(
+							() => navigate("/settings/customizability"),
+							<Palette className="h-5 w-5" />,
+							"bg-violet-500/15 text-violet-400",
+							t("settings.customizability"),
+							t("settings.customizability_desc"),
+						)}
+						{navRow(
+							() => navigate("/settings/behavior"),
+							<SlidersHorizontal className="h-5 w-5" />,
+							"bg-slate-500/15 text-slate-400",
+							t("settings.behavior"),
+							t("settings.behavior_desc"),
+						)}
+						{navRow(
+							() => navigate("/settings/notifications"),
+							<Bell className="h-5 w-5" />,
+							"bg-blue-500/15 text-blue-400",
+							t("settings.notifications"),
+							t("settings.notifications_desc"),
+						)}
+						{navRow(
+							() => navigate("/settings/automation"),
+							<Workflow className="h-5 w-5" />,
+							"bg-amber-500/15 text-amber-400",
+							t("settings.automation"),
+							t("settings.automation_desc"),
+						)}
+					</div>
+				</div>
+
+				{/* Backup & Restore */}
 				<div>
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">
-						{t("settings.data_section", { defaultValue: "Data" })}
+						{t("settings.data_section", { defaultValue: "Backup & Restore" })}
 					</p>
 					<div className="surface-card overflow-hidden divide-y divide-[var(--border)]">
 						{navRow(
 							() => navigate("/settings/data"),
 							<DatabaseBackup className="h-5 w-5" />,
 							"bg-teal-500/15 text-teal-400",
-							t("settings.data", { defaultValue: "Data" }),
+							t("settings.data", { defaultValue: "Backup & Restore" }),
 							t("settings.data_desc", { defaultValue: "Downloaded media storage, and back up/restore your entire account" }),
 						)}
 					</div>
@@ -767,31 +949,30 @@ export function SettingsPage() {
 				{/* Updates */}
 				<div>
 					<p className="mb-2 px-1 text-xs font-semibold uppercase tracking-widest text-[var(--text-muted)]">Updates</p>
-					<div className="surface-card overflow-hidden divide-y divide-[var(--border)]">
-
-						{/* Check for Updates + Channel switcher */}
+					<div className="surface-card overflow-hidden">
 						<div className="flex items-start gap-3 px-4 py-3.5">
-							<div className="rounded-2xl bg-green-500/15 p-2.5 shrink-0 text-green-400">
-								<RefreshCcw className="h-5 w-5" />
+							<div className="relative shrink-0">
+								<div className="rounded-2xl bg-green-500/15 p-2.5 text-green-400">
+									<RefreshCcw className={`h-5 w-5 ${isCheckingUpdates || isSwitchingChannel ? "animate-spin" : ""}`} />
+								</div>
+								{isContributorChannel(updateChannel) && (
+									<div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] ring-2 ring-[var(--surface)]">
+										<GitBranch className="h-3 w-3" />
+									</div>
+								)}
 							</div>
 							<div className="min-w-0 flex-1">
 								<div className="grid grid-cols-[1fr_auto] gap-x-3">
 									<p className="text-sm font-semibold leading-snug">{t("settings.check_updates")}</p>
 									<div className="row-span-2 flex items-start">
-										{isSwitchingChannel ? (
-											<span className="text-xs text-[var(--text-muted)]">{t("settings.switching")}</span>
-										) : isCheckingUpdates ? (
-											<span className="text-xs text-[var(--text-muted)]">{t("settings.checking")}</span>
-										) : (
-											<Button type="button" onClick={() => void handleCheckUpdates()} disabled={isCheckingUpdates || isSwitchingChannel}>
-												{t("settings.check_now")}
-											</Button>
-										)}
+										<Button type="button" onClick={() => void handleCheckUpdates()} disabled={isCheckingUpdates || isSwitchingChannel}>
+											{t("settings.check_now")}
+										</Button>
 									</div>
 									<p className="mt-0.5 text-xs text-[var(--text-muted)]">{t("settings.check_updates_desc")}</p>
 								</div>
 								{visibleChannels.length > 0 && (
-									<div className="mt-3 flex flex-wrap gap-1">
+									<div className="mt-3 flex flex-wrap items-center gap-1">
 										{visibleChannels.map((channel) => (
 											<button
 												key={channel}
@@ -804,71 +985,29 @@ export function SettingsPage() {
 														: "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)] hover:border-[var(--accent)]/50"
 												}`}
 											>
-												{channel}
+												{getHotswapChannelLabel(channel)}
 											</button>
 										))}
+										{isContributorChannel(updateChannel) ? (
+											<span className="rounded-full border border-[var(--accent)] bg-[var(--accent)] px-2.5 py-0.5 text-xs font-semibold text-black">
+												{getContributorHandle(updateChannel)}
+											</span>
+										) : developerMode ? (
+											<button
+												type="button"
+												onClick={() => setIsContributorDialogOpen(true)}
+												disabled={isSwitchingChannel || isCheckingUpdates}
+												aria-label="Add contributor channel"
+												title="Add contributor channel"
+												className="flex h-[22px] w-[22px] items-center justify-center rounded-full border border-dashed border-[var(--border)] text-[var(--text-muted)] transition hover:border-[var(--accent)]/50 hover:text-[var(--accent)] disabled:opacity-50"
+											>
+												<Plus className="h-3 w-3" />
+											</button>
+										) : null}
 									</div>
 								)}
 							</div>
 						</div>
-
-						{/* Contributor Channel */}
-						{(developerMode || isContributorChannel(updateChannel)) && (
-							<div className="px-4 py-3.5">
-								<div className="flex items-start gap-3">
-									<div className="rounded-2xl bg-[var(--surface-2)] p-2.5 shrink-0 text-[var(--text-muted)]">
-										<GitBranch className="h-5 w-5" />
-									</div>
-									<div className="grid gap-2 min-w-0 flex-1">
-										<div>
-											<p className="text-sm font-semibold leading-snug">Contributor Channel</p>
-											<p className="text-xs text-[var(--text-muted)] mt-0.5">Receive experimental builds from a community contributor.</p>
-										</div>
-										{isContributorChannel(updateChannel) ? (
-											<>
-												<div className="flex items-center justify-between rounded-lg bg-[var(--accent)]/10 border border-[var(--accent)]/30 px-3 py-2">
-													<div>
-														<p className="text-xs text-[var(--text-muted)]">Active</p>
-														<p className="text-sm font-semibold text-[var(--accent)]">{getContributorHandle(updateChannel)}</p>
-													</div>
-													<button
-														type="button"
-														disabled={isSwitchingChannel}
-														onClick={() => void handleLeaveContributorChannel()}
-														className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1 text-xs text-[var(--text-muted)] transition hover:border-red-400 hover:text-red-400 disabled:opacity-50"
-													>
-														{isSwitchingChannel ? "Leaving…" : "Leave"}
-													</button>
-												</div>
-												<p className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300">
-													Community build — use at your own risk.
-												</p>
-											</>
-										) : developerMode ? (
-											<div className="flex items-center gap-2">
-												<input
-													type="text"
-													value={contributorCodeInput}
-													onChange={(e) => setContributorCodeInput(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
-													onKeyDown={(e) => { if (e.key === "Enter") void handleActivateContributorChannel(); }}
-													placeholder="contributor-handle"
-													maxLength={32}
-													className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-sm outline-none focus:border-[var(--accent)]"
-												/>
-												<button
-													type="button"
-													disabled={isActivatingContributor || !contributorCodeInput}
-													onClick={() => void handleActivateContributorChannel()}
-													className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-black transition disabled:opacity-50"
-												>
-													{isActivatingContributor ? "Activating…" : "Activate"}
-												</button>
-											</div>
-										) : null}
-									</div>
-								</div>
-							</div>
-						)}
 					</div>
 				</div>
 
@@ -895,11 +1034,12 @@ export function SettingsPage() {
 							</div>
 							{navRow(
 								() => navigate("/settings/api-inspector"),
-								<Radar className="h-5 w-5" />,
+								<Terminal className="h-5 w-5" />,
 								"bg-[var(--surface-2)] text-[var(--text-muted)]",
 								t("settings.api_inspector"),
 								t("settings.api_inspector_desc"),
 							)}
+							{isAndroid() && (
 							<div className="p-4 sm:p-5">
 								<div className="flex items-start gap-3">
 									<div className="rounded-2xl bg-[var(--surface-2)] p-2.5 shrink-0 text-[var(--text-muted)]">
@@ -908,11 +1048,16 @@ export function SettingsPage() {
 									<div className="grid gap-3 min-w-0 flex-1">
 										<div className="flex items-center gap-2 flex-wrap">
 											<p className="text-sm font-semibold">Push Token (FCM)</p>
-											{fcmToken && (
-												<span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${fcmSyncedToken === fcmToken ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400"}`}>
-													{fcmSyncedToken === fcmToken ? "✓ Synced" : "⚠ Not synced"}
-												</span>
-											)}
+											{fcmToken && (() => {
+												// Sync marker is `${token}::${userId}` (see AuthContext) since the
+												// device token is shared across saved accounts but sync is per-account.
+												const isSynced = fcmSyncedToken === `${fcmToken}::${userId}`;
+												return (
+													<span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${isSynced ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400"}`}>
+														{isSynced ? "✓ Synced" : "⚠ Not synced"}
+													</span>
+												);
+											})()}
 										</div>
 										{fcmToken ? (
 											<div className="grid gap-2">
@@ -965,17 +1110,73 @@ export function SettingsPage() {
 									</div>
 								</div>
 							</div>
-							<div className="p-4 sm:p-5 border-t border-[var(--border)]">
+							)}
+							<div className="p-4 sm:p-5">
 								<div className="flex items-start gap-3">
-									<div className="rounded-2xl bg-[var(--surface-2)] p-2.5 shrink-0 text-[var(--text-muted)]">
-										<Radar className="h-5 w-5" />
+									<div className="relative shrink-0">
+										<div className="rounded-2xl bg-[var(--surface-2)] p-2.5 text-[var(--text-muted)]">
+											<Radar className="h-5 w-5" />
+										</div>
+										{fingerprintCheck.loading ? (
+											<div
+												className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full ring-2 ring-[var(--surface)]"
+												style={{ backgroundColor: "var(--accent)", color: "var(--accent-contrast)" }}
+											>
+												<Loader2 className="h-3 w-3 animate-spin" />
+											</div>
+										) : fingerprintCheck.ok ? (
+											<div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white ring-2 ring-[var(--surface)]">
+												<CheckCircle2 className="h-3 w-3" />
+											</div>
+										) : fingerprintCheck.result || fingerprintCheck.error ? (
+											<div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white ring-2 ring-[var(--surface)]">
+												<AlertCircle className="h-3 w-3" />
+											</div>
+										) : (
+											<div className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--surface-2)] text-[var(--text-muted)] ring-2 ring-[var(--surface)]">
+												<HelpCircle className="h-3 w-3" />
+											</div>
+										)}
 									</div>
 									<div className="grid gap-3 min-w-0 flex-1">
-										<div>
-											<p className="text-sm font-semibold">Fingerprint Check</p>
-											<p className="text-xs text-[var(--text-muted)] mt-0.5">Verify your HTTP/TLS fingerprint matches OkHttp configuration.</p>
+										<div className="grid grid-cols-[1fr_auto] gap-x-3">
+											<p className="text-sm font-semibold leading-snug">Fingerprint Check</p>
+											<div className="row-span-2 flex items-start">
+												<Button type="button" disabled={fingerprintCheck.loading} onClick={() => void fingerprintCheck.checkFingerprint()}>
+													Check
+												</Button>
+											</div>
+											<p className="mt-0.5 text-xs text-[var(--text-muted)]">Verify your HTTP/TLS fingerprint matches OkHttp configuration.</p>
 										</div>
-										<FingerprintCheckButton />
+										{fingerprintCheck.result && (
+											<div className="grid gap-2">
+												<div className="rounded-lg bg-[var(--surface-2)] px-3 py-2">
+													<div className="mb-1 flex items-center justify-between gap-2">
+														<p className="text-xs text-[var(--text-muted)]">JA3 Hash</p>
+														<span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${fingerprintCheck.result.ja3_match ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+															{fingerprintCheck.result.ja3_match ? "✓ Match" : "✗ Mismatch"}
+														</span>
+													</div>
+													<p className="break-all font-mono text-xs">{fingerprintCheck.result.ja3_hash}</p>
+												</div>
+												<div className="rounded-lg bg-[var(--surface-2)] px-3 py-2">
+													<div className="mb-1 flex items-center justify-between gap-2">
+														<p className="text-xs text-[var(--text-muted)]">Akamai Fingerprint</p>
+														<span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${fingerprintCheck.result.akamai_match ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>
+															{fingerprintCheck.result.akamai_match ? "✓ Match" : "✗ Mismatch"}
+														</span>
+													</div>
+													<p className="break-all font-mono text-xs">{fingerprintCheck.result.akamai_fingerprint}</p>
+												</div>
+												<p className="text-xs text-[var(--text-muted)]">HTTP Version <span className="font-mono text-[var(--text)]">{fingerprintCheck.result.http_version}</span></p>
+											</div>
+										)}
+										{fingerprintCheck.error && (
+											<div className="rounded-lg bg-yellow-500/10 border border-yellow-500/30 px-3 py-2 text-sm text-yellow-400">
+												<p className="font-medium mb-0.5">Fingerprint check failed</p>
+												<p className="text-xs opacity-80">{fingerprintCheck.error}</p>
+											</div>
+										)}
 									</div>
 								</div>
 							</div>
@@ -1000,22 +1201,6 @@ export function SettingsPage() {
 						</div>
 					</div>
 				) : null}
-
-				{previewAnnouncement && LATEST_ANNOUNCEMENT && (
-					<VersionAnnouncement
-						announcement={LATEST_ANNOUNCEMENT}
-						buttonLabel="Close"
-						onClose={() => setPreviewAnnouncement(false)}
-					/>
-				)}
-
-				{previewOutdatedPrompt && (
-					<OutdatedVersionPromptView
-						appVersion={import.meta.env.VITE_APP_VERSION}
-						releaseInfo={PREVIEW_RELEASE_INFO}
-						onDismiss={() => setPreviewOutdatedPrompt(false)}
-					/>
-				)}
 
 				{/* About */}
 				<div>
@@ -1046,6 +1231,7 @@ export function SettingsPage() {
 				</div>
 
 			</div>
+			)}
 
 			<ConfirmDialog
 				isOpen={logoutConfirmTarget != null}
@@ -1069,6 +1255,18 @@ export function SettingsPage() {
 					}
 				}}
 				onCancel={() => setLogoutConfirmTarget(null)}
+			/>
+
+			<ContributorChannelDialog
+				isOpen={isContributorDialogOpen}
+				value={contributorCodeInput}
+				onValueChange={setContributorCodeInput}
+				onSubmit={() => void handleActivateContributorChannel()}
+				onCancel={() => {
+					setIsContributorDialogOpen(false);
+					setContributorCodeInput("");
+				}}
+				isProcessing={isActivatingContributor}
 			/>
 		</section>
 	);
