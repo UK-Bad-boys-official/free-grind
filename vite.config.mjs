@@ -75,7 +75,16 @@ export default defineConfig(async () => ({
 			: undefined,
 		watch: {
 			// 3. tell Vite to ignore watching `src-tauri`
-			ignored: ["**/src-tauri/**"],
+			ignored: [
+				"**/src-tauri/**",
+				// Vite already skips `.git`, but any other hidden directory at the
+				// project root (tool caches, agent homes, editor state) is still
+				// walked recursively. Those can hold tens of thousands of files,
+				// which exhausts the OS file-watcher limit and kills the dev
+				// server at startup with ENOSPC. Nothing served to the browser
+				// lives in a hidden directory, so skip them all.
+				"**/.*/**",
+			],
 		},
 	},
 }));

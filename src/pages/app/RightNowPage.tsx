@@ -561,7 +561,7 @@ export function RightNowPage() {
 						sessionStorage.removeItem(storageKey);
 						feedContainerRef.current.scrollTop = 0;
 					}
-				} catch (e) {
+				} catch {
 					sessionStorage.removeItem(storageKey);
 					feedContainerRef.current.scrollTop = 0;
 				}

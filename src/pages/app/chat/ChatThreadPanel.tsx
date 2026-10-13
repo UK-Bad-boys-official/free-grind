@@ -53,6 +53,7 @@ import "react-image-crop/dist/ReactCrop.css";
 import type { NavigateFunction } from "react-router-dom";
 import toast from "react-hot-toast";
 import { appLog } from "../../../utils/logger";
+import { vibrate } from "../../../utils/haptics";
 import { isIos, saveMediaToDevice } from "../../../services/saveMedia";
 import { startOutgoingCall } from "../../../components/VideoCallManager";
 import { useVideoCallRemainingSeconds } from "../../../hooks/queries/useVideoCallQueries";
@@ -444,7 +445,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 			mediaRecorderRef.current = recorder;
 			recordingStartRef.current = Date.now();
 			setIsRecording(true);
-			(window as unknown as { FreeGrindBridge?: { vibrate?: (ms: number) => void } }).FreeGrindBridge?.vibrate?.(30) ?? navigator.vibrate?.(30);
+			vibrate(30);
 			setRecordingMs(0);
 			recordingTimerRef.current = setInterval(() => {
 				const elapsed = Date.now() - recordingStartRef.current;
@@ -505,7 +506,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 			void fixWebmDuration(rawBlob, durationMs).then((blob) => {
 				if (durationMs >= 500) {
 					if (autoSend) {
-						(window as unknown as { FreeGrindBridge?: { vibrate?: (ms: number) => void } }).FreeGrindBridge?.vibrate?.(30) ?? navigator.vibrate?.(30);
+						vibrate(30);
 					}
 					setRecordedWaveform(capturedBars);
 					props.onAudioRecorded(blob, durationMs, autoSend);
@@ -2299,7 +2300,7 @@ export function ChatThreadPanel(props: ChatThreadPanelProps) {
 											isCapturingRef.current = false;
 											e.currentTarget.releasePointerCapture(e.pointerId);
 											if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
-											(window as unknown as { FreeGrindBridge?: { vibrate?: (ms: number) => void } }).FreeGrindBridge?.vibrate?.(80) ?? navigator.vibrate?.(80);
+											vibrate(80);
 											setTrashBounce(true);
 											setTimeout(() => {
 												setTrashBounce(false);

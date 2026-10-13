@@ -10,6 +10,7 @@ import React, { Fragment, useEffect, useState, useMemo, useCallback, useRef, use
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { appLog } from "../../../utils/logger";
+import { vibrate } from "../../../utils/haptics";
 import { isIos, saveMediaToDevice } from "../../../services/saveMedia";
 import { loadSavedPhrases, saveSavedPhrases } from "../../../services/savedPhrases";
 import type { ConversationEntry, Message } from "../../../types/messages";
@@ -610,7 +611,7 @@ export function ChatThreadMessages({
 					icon.style.transform = "translateY(-50%) scale(1.3)";
 					icon.style.opacity = "1";
 				}
-				(window as unknown as { FreeGrindBridge?: { vibrate?: (ms: number) => void } }).FreeGrindBridge?.vibrate?.(40) ?? navigator.vibrate?.(40);
+				vibrate(40);
 				setTimeout(() => {
 					resetSwipeVisual(triggeredId);
 					void handleReply(message);

@@ -690,11 +690,10 @@ export function GridPage() {
 					);
 				}
 			} finally {
-				if (!isMountedRef.current) {
-					return;
-				}
-
-				if (showLoadingState) {
+				// Guarded rather than an early `return`: returning out of a
+				// finally block overrides normal completion and silently
+				// swallows any in-flight exception.
+				if (isMountedRef.current && showLoadingState) {
 					setIsLoadingCards(false);
 				}
 			}
@@ -885,7 +884,6 @@ export function GridPage() {
 		if (!geohash || !nextPage || isLoadingMoreCards) return;
 		if (nicknameFilter && loadedPageCount >= NICKNAME_FILTER_MAX_PAGES) return;
 		setIsLoadingMoreCards(true);
-		let cancelled = false;
 		try {
 			const parsed = await fetchGridCards({
 				activeGeohash: geohash,
@@ -904,7 +902,9 @@ export function GridPage() {
 					error,
 				);
 			});
-			if (!cancelled) {
+			// Guarded on the mounted ref rather than the `cancelled` flag this
+			// used to declare: nothing ever set it, so the guards always ran.
+			if (isMountedRef.current) {
 				setCards((prev) => {
 					const next = [...prev, ...parsed.cards];
 					setCachedBrowseCards(browseCacheKey, next, parsed.nextPage ?? null);
@@ -916,7 +916,7 @@ export function GridPage() {
 		} catch {
 			// silently fail — existing cards remain
 		} finally {
-			if (!cancelled) setIsLoadingMoreCards(false);
+			if (isMountedRef.current) setIsLoadingMoreCards(false);
 		}
 	};
 	useEffect(() => {

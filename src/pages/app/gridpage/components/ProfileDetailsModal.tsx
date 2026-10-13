@@ -30,6 +30,7 @@ import {
 	getTribeLabelMap,
 	getVaccineLabelMap,
 } from "../../profile-option-builders";
+import { vibrate } from "../../../../utils/haptics";
 import { getProfileImageUrl } from "../../../../utils/media";
 import { resolveAvatarSrc } from "../../../../services/avatarStore";
 import { getForbiddenWords, setForbiddenWords } from "../../../../utils/autoblock";
@@ -691,8 +692,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 			setBarTapPickerOpen(true);
 			setBarInputVisible(false);
 			if (barInputTimerRef.current) clearTimeout(barInputTimerRef.current);
-			const bridge = (window as any).FreeGrindBridge;
-			bridge?.vibrate?.(10) ?? navigator.vibrate?.(10);
+			vibrate(10);
 		}, 300);
 	};
 
@@ -711,16 +711,14 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 		if (newId !== barTapHoverId) {
 			setBarTapHoverId(newId);
 			if (newId !== null) {
-				const bridge = (window as any).FreeGrindBridge;
-				bridge?.vibrate?.(8) ?? navigator.vibrate?.(8);
+				vibrate(8);
 			}
 		}
 	};
 
 	const fireTap = (tapId: number) => {
 		if (!onTapProfile || !messageProfileId || isTapBlocked) return;
-		const bridge = (window as any).FreeGrindBridge;
-		bridge?.vibrate?.(30) ?? navigator.vibrate?.([15, 10, 25]);
+		vibrate(30, [15, 10, 25]);
 		onTapProfile(String(messageProfileId), tapId);
 		const btnRect = barTapButtonRef.current?.getBoundingClientRect();
 		const originDx = btnRect ? btnRect.left + btnRect.width / 2 - window.innerWidth / 2 : window.innerWidth / 2 - 110;
@@ -1504,7 +1502,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 										<button
 											type="button"
 											disabled={isProfileUnavailable}
-											onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+											onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; if (isHidden) { onUnhideProfile?.(String(messageProfileId)); } else { onHideProfile?.(String(messageProfileId)); } }}
 											className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
 										>
 											{isHidden ? <Eye className="mr-2 h-4 w-4 opacity-70" /> : <EyeOff className="mr-2 h-4 w-4 opacity-70" />}
@@ -2107,7 +2105,7 @@ const barTapGlow = (id: number) => id === 0 ? "drop-shadow(0 0 10px rgba(234,179
 														<button
 															type="button"
 															disabled={isProfileUnavailable}
-															onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; isHidden ? onUnhideProfile?.(String(messageProfileId)) : onHideProfile?.(String(messageProfileId)); }}
+															onClick={() => { setIsActionsMenuOpen(false); if (!messageProfileId || isProfileUnavailable) return; if (isHidden) { onUnhideProfile?.(String(messageProfileId)); } else { onHideProfile?.(String(messageProfileId)); } }}
 															className="flex items-center rounded-lg px-2 py-2 text-left text-sm text-[var(--text)] transition hover:bg-[var(--surface-2)] disabled:opacity-50"
 														>
 															{isHidden ? <Eye className="mr-2 h-4 w-4 opacity-70" /> : <EyeOff className="mr-2 h-4 w-4 opacity-70" />}

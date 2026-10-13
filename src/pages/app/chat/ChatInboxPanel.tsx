@@ -12,6 +12,7 @@ import type { ConversationEntry } from "../../../types/messages";
 import type { ChatContactIndexRecord } from "../../../types/chat-contact-index";
 import { FreeGrindBadge } from "../../../components/FreeGrindBadge";
 import { PullToRefreshContainer } from "../components/PullToRefreshContainer";
+import { vibrate } from "../../../utils/haptics";
 import {
 	formatConversationTime,
 	getOtherParticipant,
@@ -342,8 +343,7 @@ function ChatConversationRow({
 		if (isArmed !== state.armed) {
 			state.armed = isArmed;
 			if (isArmed) {
-				(window as unknown as { FreeGrindBridge?: { vibrate?: (ms: number) => void } }).FreeGrindBridge
-					?.vibrate?.(15) ?? navigator.vibrate?.(15);
+				vibrate(15);
 			}
 		}
 	};

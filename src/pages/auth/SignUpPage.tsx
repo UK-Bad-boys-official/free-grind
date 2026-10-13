@@ -14,7 +14,7 @@ export function SignUpPage() {
 		setIsLoading(true);
 		try {
 			await openUrl("https://github.com/imaoreo/free-grind/issues/2");
-		} catch (error) {
+		} catch {
 			// Web fallback when not running under Tauri
 			window.open(
 				"https://github.com/imaoreo/free-grind/issues/2",

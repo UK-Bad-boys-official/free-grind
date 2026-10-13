@@ -59,8 +59,8 @@ export function BottomSheet({
 	// useEffect fires after browser has painted — double RAF ensures initial
 	// translateY(120%) is committed before we transition to translateY(0)
 	useEffect(() => {
-		let r1: number, r2: number;
-		r1 = requestAnimationFrame(() => {
+		let r2: number;
+		const r1 = requestAnimationFrame(() => {
 			r2 = requestAnimationFrame(() => setIsVisible(true));
 		});
 		return () => {

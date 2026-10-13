@@ -598,8 +598,8 @@ export function ChatDrawerPanel({
 												key={`album-${album.albumId}`}
 												role="button"
 												tabIndex={0}
-												onClick={() => { if (hasSelection) return; setSelectedAlbumIds(prev => { const n = new Set(prev); n.has(album.albumId) ? n.delete(album.albumId) : n.add(album.albumId); return n; }); }}
-												onKeyDown={(e) => { if (e.key === "Enter" && !hasSelection) { setSelectedAlbumIds(prev => { const n = new Set(prev); n.has(album.albumId) ? n.delete(album.albumId) : n.add(album.albumId); return n; }); } }}
+												onClick={() => { if (hasSelection) return; setSelectedAlbumIds(prev => { const n = new Set(prev); if (n.has(album.albumId)) { n.delete(album.albumId); } else { n.add(album.albumId); } return n; }); }}
+												onKeyDown={(e) => { if (e.key === "Enter" && !hasSelection) { setSelectedAlbumIds(prev => { const n = new Set(prev); if (n.has(album.albumId)) { n.delete(album.albumId); } else { n.add(album.albumId); } return n; }); } }}
 												className={`relative aspect-square overflow-hidden cursor-pointer transition ${dimmed ? "opacity-30 pointer-events-none" : ""}`}
 											>
 												{cover ? <img src={cover} alt="" className="h-full w-full object-cover scale-110" style={{ filter: "blur(3px)" }} /> : (

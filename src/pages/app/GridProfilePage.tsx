@@ -633,7 +633,7 @@ export function GridProfilePage() {
                         body: payload,
                     });
                     if (response.status >= 200 && response.status < 300) return;
-                } catch (e) {
+                } catch {
                     continue;
                 }
             }

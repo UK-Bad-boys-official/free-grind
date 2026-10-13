@@ -33,7 +33,9 @@ function loadStoredLimit(tab: InterestTab, fallback: number): number {
 			if (limit && Date.now() - timestamp < SCROLL_RESTORATION_TIMEOUT_MS) {
 				return limit;
 			}
-		} catch (e) {}
+		} catch {
+			// Corrupt/absent scroll state — fall through to the fallback.
+		}
 	}
 	return fallback;
 }
@@ -438,7 +440,7 @@ export function InterestPage() {
 						// Clean up expired scroll data
 						sessionStorage.removeItem(storageKey);
 					}
-				} catch (e) {
+				} catch {
 					sessionStorage.removeItem(storageKey);
 				}
 			} else {
