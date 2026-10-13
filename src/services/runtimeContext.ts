@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { BaseDirectory, exists, readTextFile } from "@tauri-apps/plugin-fs";
 import { platform } from "@tauri-apps/plugin-os";
 
@@ -54,7 +54,21 @@ async function getTraceRuntimeContext(): Promise<RuntimeContext | null> {
     // if it happens to race the initial page load — observed as a 5s
     // "Input dispatching timed out" ANR right at cold start. Skipping this
     // call entirely on non-Windows platforms removes that race outright.
-    if (platform() !== "windows") {
+    // `platform()` is synchronous and reads `window.__TAURI_OS_PLUGIN_INTERNALS__`,
+    // which only exists inside a Tauri webview. In a plain browser (the
+    // `dev:web` workflow) it throws a TypeError, so it must be guarded — this
+    // function is awaited on the boot path and any throw here aborts
+    // main.tsx before React ever mounts, leaving a blank page.
+    if (!isTauri()) {
+        return null;
+    }
+    let currentPlatform: string;
+    try {
+        currentPlatform = platform();
+    } catch {
+        return null;
+    }
+    if (currentPlatform !== "windows") {
         return null;
     }
     const tracePath = "AppData/Local/free-grind/manager/runtime-mode.txt";
@@ -72,6 +86,13 @@ async function getTraceRuntimeContext(): Promise<RuntimeContext | null> {
 }
 
 export async function getRuntimeContext(): Promise<RuntimeContext> {
+    // Outside a Tauri webview the `runtime_context` command can never succeed,
+    // so skip the retry loop entirely: it would otherwise stall boot for
+    // ~2s (20 attempts x 100ms) before falling through to the same default.
+    if (!isTauri()) {
+        return { mode: "child", instanceLabel: "default" };
+    }
+
     const maxAttempts = 20;
     const retryDelayMs = 100;
     let lastError: unknown;

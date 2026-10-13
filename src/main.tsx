@@ -32,7 +32,16 @@ const queryClient = new QueryClient({
 });
 
 void (async () => {
-	const runtimeContext = await getRuntimeContext();
+	let runtimeContext: Awaited<ReturnType<typeof getRuntimeContext>>;
+	try {
+		runtimeContext = await getRuntimeContext();
+	} catch (error) {
+		// getRuntimeContext already falls back internally, so this is a
+		// last-resort guard: a throw here would reject before ReactDOM renders
+		// and leave the user staring at a blank window with no error surface.
+		appLog.warn("[boot] runtime context lookup failed, using defaults:", error);
+		runtimeContext = { mode: "child", instanceLabel: "default" };
+	}
 	const renderManager =
 		runtimeContext.mode === "manager" || runtimeContext.instanceLabel === "manager";
 
