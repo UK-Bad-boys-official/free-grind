@@ -436,7 +436,15 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
 		}
 		let cancelled = false;
 		void (async () => {
-			const stored = await getSetting<Partial<StoredLocationPrefs>>(LOCATION_SETTINGS_KEY);
+			// A failed settings read must not take the provider down with it:
+			// this effect is fire-and-forget, so a rejection here surfaces as an
+			// unhandled rejection and the app never flips isLocationLoaded.
+			let stored: Partial<StoredLocationPrefs> | null = null;
+			try {
+				stored = await getSetting<Partial<StoredLocationPrefs>>(LOCATION_SETTINGS_KEY);
+			} catch (error) {
+				appLog.warn("[preferences] failed to read stored location, using defaults", error);
+			}
 			if (cancelled) {
 				return;
 			}

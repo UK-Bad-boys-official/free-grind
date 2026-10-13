@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
+import { isTauri } from "@tauri-apps/api/core";
 import { appLog } from "../utils/logger";
 
 type NativePushNotificationDetail = {
@@ -173,17 +174,29 @@ export function PushNotificationBridge() {
 		// when the user clicks a native toast, carrying the same `group`
 		// (conversationId, or "taps") it was posted with — see
 		// notification-patched/src/desktop.rs's `show_windows`.
+		//
+		// `listen()` throws synchronously outside a Tauri webview (it builds its
+		// callback through window.__TAURI_INTERNALS__.transformCallback before
+		// ever reaching the IPC call), so an unguarded call escapes the effect
+		// as an uncaught error during commit. It also rejects if the IPC fails,
+		// which would leave an unhandled rejection behind.
 		let unlistenClicked: (() => void) | undefined;
-		void listen<string>("fg:notification-clicked", (event) => {
-			const group = event.payload;
-			const detail: NativePushNotificationDetail =
-				group === "taps"
-					? { event: "opened", action: "taps", conversationId: null, senderId: null }
-					: { event: "opened", action: `chat:${group}`, conversationId: group, senderId: null };
-			handleDetail(detail);
-		}).then((unlisten) => {
-			unlistenClicked = unlisten;
-		});
+		if (isTauri()) {
+			listen<string>("fg:notification-clicked", (event) => {
+				const group = event.payload;
+				const detail: NativePushNotificationDetail =
+					group === "taps"
+						? { event: "opened", action: "taps", conversationId: null, senderId: null }
+						: { event: "opened", action: `chat:${group}`, conversationId: group, senderId: null };
+				handleDetail(detail);
+			})
+				.then((unlisten) => {
+					unlistenClicked = unlisten;
+				})
+				.catch((error) => {
+					appLog.warn("[PUSH_EVENT] Failed to subscribe to notification clicks", error);
+				});
+		}
 
 		return () => {
 			window.removeEventListener(

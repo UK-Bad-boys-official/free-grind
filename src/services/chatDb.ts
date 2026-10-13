@@ -511,6 +511,14 @@ async function getDb(): Promise<Database> {
 
 			return db;
 		})();
+
+		// If the initial open fails (plugin not ready yet, locked file, closed
+		// pool, ...) the cached promise would stay rejected for the rest of the
+		// session, so every later settings/chat read replays the same failure
+		// forever. Drop the cache on failure so the next call retries.
+		dbPromise.catch(() => {
+			dbPromise = null;
+		});
 	}
 
 	return dbPromise;
