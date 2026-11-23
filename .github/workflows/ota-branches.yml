@@ -69,49 +69,9 @@ jobs:
 
           # Support a full minisign secret key, literal \n line breaks, or a base64
           # encoding of the full two-line key. Never print or persist key material.
-          signing_key="${HOTSWAP_PRIVATE_KEY//
-
-      - name: Upload OTA bundle to backend
-        env:
-          OTA_BACKEND_URL: ${{ secrets.OTA_BACKEND_URL }}
-          OTA_BACKEND_TOKEN: ${{ secrets.OTA_BACKEND_TOKEN }}
-        run: |
-          BACKEND_URL="${OTA_BACKEND_URL%/}"
-          RESPONSE=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/api/releases" \
-            -H "Authorization: Bearer $OTA_BACKEND_TOKEN" \
-            -F "channel=${{ steps.ota-meta.outputs.channel }}" \
-            -F "platform=all" \
-            -F "arch=all" \
-            -F "version=${{ steps.ota-meta.outputs.ota_version }}" \
-            -F "minBinaryVersion=$(jq -r '.version' package.json)" \
-            -F "signature=$(cat frontend.tar.gz.sig)" \
-            -F "notes=${{ steps.ota-meta.outputs.notes }}" \
-            -F "mandatory=false" \
-            -F "bundleFile=@frontend.tar.gz;type=application/gzip")
-
-          echo "$RESPONSE"\r'/}"
+          signing_key="${HOTSWAP_PRIVATE_KEY//$'\r'/}"
           if [[ "$signing_key" != 'untrusted comment:'* ]]; then
-            normalized="${signing_key//\\n/
-
-      - name: Upload OTA bundle to backend
-        env:
-          OTA_BACKEND_URL: ${{ secrets.OTA_BACKEND_URL }}
-          OTA_BACKEND_TOKEN: ${{ secrets.OTA_BACKEND_TOKEN }}
-        run: |
-          BACKEND_URL="${OTA_BACKEND_URL%/}"
-          RESPONSE=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/api/releases" \
-            -H "Authorization: Bearer $OTA_BACKEND_TOKEN" \
-            -F "channel=${{ steps.ota-meta.outputs.channel }}" \
-            -F "platform=all" \
-            -F "arch=all" \
-            -F "version=${{ steps.ota-meta.outputs.ota_version }}" \
-            -F "minBinaryVersion=$(jq -r '.version' package.json)" \
-            -F "signature=$(cat frontend.tar.gz.sig)" \
-            -F "notes=${{ steps.ota-meta.outputs.notes }}" \
-            -F "mandatory=false" \
-            -F "bundleFile=@frontend.tar.gz;type=application/gzip")
-
-          echo "$RESPONSE"\n'}"
+            normalized="${signing_key//\\n/$'\n'}"
             if [[ "$normalized" == 'untrusted comment:'* ]]; then
               signing_key="$normalized"
             else
@@ -122,27 +82,7 @@ jobs:
             fi
           fi
 
-          if [[ "$signing_key" != 'untrusted comment:'* || "$signing_key" != *
-
-      - name: Upload OTA bundle to backend
-        env:
-          OTA_BACKEND_URL: ${{ secrets.OTA_BACKEND_URL }}
-          OTA_BACKEND_TOKEN: ${{ secrets.OTA_BACKEND_TOKEN }}
-        run: |
-          BACKEND_URL="${OTA_BACKEND_URL%/}"
-          RESPONSE=$(curl --fail-with-body -sS -X POST "$BACKEND_URL/api/releases" \
-            -H "Authorization: Bearer $OTA_BACKEND_TOKEN" \
-            -F "channel=${{ steps.ota-meta.outputs.channel }}" \
-            -F "platform=all" \
-            -F "arch=all" \
-            -F "version=${{ steps.ota-meta.outputs.ota_version }}" \
-            -F "minBinaryVersion=$(jq -r '.version' package.json)" \
-            -F "signature=$(cat frontend.tar.gz.sig)" \
-            -F "notes=${{ steps.ota-meta.outputs.notes }}" \
-            -F "mandatory=false" \
-            -F "bundleFile=@frontend.tar.gz;type=application/gzip")
-
-          echo "$RESPONSE"\n'* ]]; then
+          if [[ "$signing_key" != 'untrusted comment:'* || "$signing_key" != *$'\n'* ]]; then
             echo "::error::HOTSWAP_PRIVATE_KEY must be the full two-line Tauri/minisign private key (including its 'untrusted comment:' header), or its base64 encoding."
             exit 1
           fi
