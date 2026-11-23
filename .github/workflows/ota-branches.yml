@@ -32,9 +32,12 @@ jobs:
 
       - name: Resolve OTA metadata
         id: ota-meta
+        env:
+          OTA_CHANNEL_INPUT: ${{ github.event.inputs.channel }}
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            channel="${{ github.event.inputs.channel }}"
+            channel="$OTA_CHANNEL_INPUT"
           else
             case "${GITHUB_REF_NAME}" in
               development)
@@ -45,6 +48,12 @@ jobs:
                 exit 1
                 ;;
             esac
+          fi
+
+          # Reject unsafe or malformed channel names before publishing.
+          if [[ ! "$channel" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+            echo "::error::Invalid OTA channel; use 1-64 letters, digits, dots, underscores or hyphens."
+            exit 1
           fi
 
           echo "channel=${channel}" >> "$GITHUB_OUTPUT"
