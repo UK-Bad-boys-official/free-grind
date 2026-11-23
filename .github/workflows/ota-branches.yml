@@ -76,25 +76,35 @@ jobs:
             exit 1
           fi
 
-          # Support a full minisign secret key, literal \n line breaks, or a base64
-          # encoding of the full two-line key. Never print or persist key material.
+          # Accept only the complete existing Tauri/minisign signing key.
+          # Support raw multiline text, literal \n, or base64 of the entire key.
+          # Never print key material or generate replacement keys here.
           signing_key="${HOTSWAP_PRIVATE_KEY//$'\r'/}"
-          if [[ "$signing_key" != 'untrusted comment:'* ]]; then
+          if [[ "$signing_key" != "untrusted comment:"* ]]; then
             normalized="${signing_key//\\n/$'\n'}"
-            if [[ "$normalized" == 'untrusted comment:'* ]]; then
+            if [[ "$normalized" == "untrusted comment:"* ]]; then
               signing_key="$normalized"
             else
               decoded="$(printf '%s' "$signing_key" | base64 --decode 2>/dev/null || true)"
-              if [[ "$decoded" == 'untrusted comment:'* ]]; then
+              if [[ "$decoded" == "untrusted comment:"* ]]; then
                 signing_key="$decoded"
               fi
             fi
           fi
 
-          if [[ "$signing_key" != 'untrusted comment:'* || "$signing_key" != *$'\n'* ]]; then
-            echo "::error::HOTSWAP_PRIVATE_KEY must be the full two-line Tauri/minisign private key (including its 'untrusted comment:' header), or its base64 encoding."
+          # Tauri secret keys have a comment line followed by key data.
+          # Reject incomplete or malformed text before invoking the signer.
+          if [[ "$signing_key" != "untrusted comment:"* || "$signing_key" != *$'\n'* ]]; then
+            echo "::error::HOTSWAP_PRIVATE_KEY is not a complete Tauri/minisign secret key. Check the existing GitHub Actions secret (do not rotate it). "
             exit 1
           fi
+          key_body="${signing_key#*$'\n'}"
+          key_body="${key_body%%$'\n'*}"
+          if [[ -z "$key_body" || ! "$key_body" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+            echo "::error::HOTSWAP_PRIVATE_KEY has a malformed key-data line. Check the secret formatting."
+            exit 1
+          fi
+          unset key_body
 
           bunx tauri signer sign frontend.tar.gz -k "$signing_key" -p "${HOTSWAP_PRIVATE_KEY_PASSWORD:-}"
           unset signing_key normalized decoded
