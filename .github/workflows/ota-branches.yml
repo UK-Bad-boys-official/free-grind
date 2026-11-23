@@ -22,19 +22,22 @@ jobs:
   publish-ota:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
       - name: Resolve OTA metadata
         id: ota-meta
+        env:
+          OTA_CHANNEL_INPUT: ${{ github.event.inputs.channel }}
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            channel="${{ github.event.inputs.channel }}"
+            channel="$OTA_CHANNEL_INPUT"
           else
             case "${GITHUB_REF_NAME}" in
               development)
@@ -45,6 +48,12 @@ jobs:
                 exit 1
                 ;;
             esac
+          fi
+
+          # Reject unsafe or malformed channel names before publishing.
+          if [[ ! "$channel" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+            echo "::error::Invalid OTA channel; use 1-64 letters, digits, dots, underscores or hyphens."
+            exit 1
           fi
 
           echo "channel=${channel}" >> "$GITHUB_OUTPUT"
@@ -61,7 +70,44 @@ jobs:
           HOTSWAP_PRIVATE_KEY: ${{ secrets.HOTSWAP_PRIVATE_KEY }}
           HOTSWAP_PRIVATE_KEY_PASSWORD: ${{ secrets.HOTSWAP_PRIVATE_KEY_PASSWORD }}
         run: |
-          bunx tauri signer sign frontend.tar.gz -k "$HOTSWAP_PRIVATE_KEY" -p "${HOTSWAP_PRIVATE_KEY_PASSWORD:-}"
+          set -euo pipefail
+          if [[ -z "$HOTSWAP_PRIVATE_KEY" ]]; then
+            echo "::error::HOTSWAP_PRIVATE_KEY is missing; configure a Tauri signing key in GitHub Actions secrets."
+            exit 1
+          fi
+
+          # Accept only the complete existing Tauri/minisign signing key.
+          # Support raw multiline text, literal \n, or base64 of the entire key.
+          # Never print key material or generate replacement keys here.
+          signing_key="${HOTSWAP_PRIVATE_KEY//$'\r'/}"
+          if [[ "$signing_key" != "untrusted comment:"* ]]; then
+            normalized="${signing_key//\\n/$'\n'}"
+            if [[ "$normalized" == "untrusted comment:"* ]]; then
+              signing_key="$normalized"
+            else
+              decoded="$(printf '%s' "$signing_key" | base64 --decode 2>/dev/null || true)"
+              if [[ "$decoded" == "untrusted comment:"* ]]; then
+                signing_key="$decoded"
+              fi
+            fi
+          fi
+
+          # Tauri secret keys have a comment line followed by key data.
+          # Reject incomplete or malformed text before invoking the signer.
+          if [[ "$signing_key" != "untrusted comment:"* || "$signing_key" != *$'\n'* ]]; then
+            echo "::error::HOTSWAP_PRIVATE_KEY is not a complete Tauri/minisign secret key. Check the existing GitHub Actions secret (do not rotate it). "
+            exit 1
+          fi
+          key_body="${signing_key#*$'\n'}"
+          key_body="${key_body%%$'\n'*}"
+          if [[ -z "$key_body" || ! "$key_body" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+            echo "::error::HOTSWAP_PRIVATE_KEY has a malformed key-data line. Check the secret formatting."
+            exit 1
+          fi
+          unset key_body
+
+          bunx tauri signer sign frontend.tar.gz -k "$signing_key" -p "${HOTSWAP_PRIVATE_KEY_PASSWORD:-}"
+          unset signing_key normalized decoded
 
       - name: Upload OTA bundle to backend
         env:
